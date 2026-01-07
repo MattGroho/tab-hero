@@ -1,11 +1,15 @@
+"""Parser for .chart format files."""
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import re
+import chardet
 
 
 @dataclass
 class NoteEvent:
+    """A single note or chord in a chart."""
     timestamp_ms: float
     frets: List[int]
     duration_ms: float = 0.0
@@ -13,6 +17,7 @@ class NoteEvent:
 
 @dataclass
 class ChartData:
+    """Container for parsed chart data."""
     notes: List[NoteEvent]
     instrument: str
     difficulty: str
@@ -22,6 +27,8 @@ class ChartData:
 
 
 class ChartParser:
+    """Parser for .chart files."""
+
     INSTRUMENTS = ["lead", "bass", "rhythm", "keys"]
     DIFFICULTIES = ["easy", "medium", "hard", "expert"]
 
@@ -42,6 +49,16 @@ class ChartParser:
             return self._parse_chart_file(path, instrument, difficulty)
         else:
             raise ValueError(f"Unsupported format: {path.suffix}")
+
+    def _read_chart_content(self, path: Path) -> str:
+        """Read chart file with encoding detection."""
+        try:
+            return path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            raw = path.read_bytes()
+            detected = chardet.detect(raw)
+            encoding = detected.get("encoding", "utf-8") or "utf-8"
+            return raw.decode(encoding, errors="replace")
 
     def _ticks_to_ms(self, ticks: int, bpm_events: List[Dict], resolution: int) -> float:
         if not bpm_events:
@@ -67,7 +84,7 @@ class ChartParser:
         return current_time_ms
 
     def _parse_chart_file(self, path: Path, instrument: str, difficulty: str) -> ChartData:
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = self._read_chart_content(path)
         sections = self._parse_chart_sections(content)
 
         resolution = 192
@@ -78,7 +95,6 @@ class ChartParser:
                     if match:
                         resolution = int(match.group(1))
 
-        # parse BPM events
         bpm_events = []
         if "SyncTrack" in sections:
             for line in sections["SyncTrack"]:
