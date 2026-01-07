@@ -1,0 +1,20 @@
+# Tab Hero - Python Dependencies
+# Automatic Guitar Chart Generation from Audio
+
+# Core ML/Deep Learning
+torch>=2.1.0
+torchaudio>=2.1.0
+
+# Audio Processing
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# Data Processing
+numpy>=1.24.0
+
+# File Format Parsing
+mido>=1.3.0
+chardet>=5.2.0
+
+# Utilities
+tqdm>=4.66.0

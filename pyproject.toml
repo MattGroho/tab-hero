@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tab-hero"
+version = "0.1.0"
+description = "Guitar chart generation from audio"
+requires-python = ">=3.11"
+authors = [
+    {name = "Christopher Pleman", email = "cpleman@umich.edu"},
+    {name = "Matthew Grohotolski", email = "mgroho@umich.edu"},
+    {name = "Susan Hatem", email = "susanhat@umich.edu"},
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
