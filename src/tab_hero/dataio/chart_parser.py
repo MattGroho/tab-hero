@@ -43,6 +43,29 @@ class ChartParser:
         else:
             raise ValueError(f"Unsupported format: {path.suffix}")
 
+    def _ticks_to_ms(self, ticks: int, bpm_events: List[Dict], resolution: int) -> float:
+        if not bpm_events:
+            return ticks * (60000.0 / 120.0) / resolution
+
+        current_tick = 0
+        current_time_ms = 0.0
+        current_bpm = 120.0
+
+        for event in bpm_events:
+            event_tick = event["tick"]
+            if event_tick > ticks:
+                break
+            tick_delta = event_tick - current_tick
+            ms_per_tick = (60000.0 / current_bpm) / resolution
+            current_time_ms += tick_delta * ms_per_tick
+            current_tick = event_tick
+            current_bpm = event["bpm"]
+
+        tick_delta = ticks - current_tick
+        ms_per_tick = (60000.0 / current_bpm) / resolution
+        current_time_ms += tick_delta * ms_per_tick
+        return current_time_ms
+
     def _parse_chart_file(self, path: Path, instrument: str, difficulty: str) -> ChartData:
         content = path.read_text(encoding="utf-8", errors="replace")
         sections = self._parse_chart_sections(content)
@@ -54,6 +77,19 @@ class ChartParser:
                     match = re.search(r"Resolution\s*=\s*(\d+)", line)
                     if match:
                         resolution = int(match.group(1))
+
+        # parse BPM events
+        bpm_events = []
+        if "SyncTrack" in sections:
+            for line in sections["SyncTrack"]:
+                match = re.match(r"\s*(\d+)\s*=\s*B\s+(\d+)", line)
+                if match:
+                    tick = int(match.group(1))
+                    bpm = int(match.group(2)) / 1000.0
+                    bpm_events.append({"tick": tick, "bpm": bpm})
+
+        if not bpm_events:
+            bpm_events = [{"tick": 0, "bpm": 120.0}]
 
         section_names = self.CHART_SECTION_NAMES.get(
             (difficulty, instrument), [f"{difficulty.capitalize()}Single"]
@@ -79,23 +115,29 @@ class ChartParser:
                         note_events[tick] = []
                     note_events[tick].append((note_val, duration))
 
-        # convert ticks to ms (assuming 120 bpm for now)
-        ms_per_tick = (60000.0 / 120.0) / resolution
         notes = []
         for tick in sorted(note_events.keys()):
             frets = [f for f, _ in note_events[tick]]
             max_dur = max(d for _, d in note_events[tick])
+            timestamp_ms = self._ticks_to_ms(tick, bpm_events, resolution)
+            duration_ms = self._ticks_to_ms(tick + max_dur, bpm_events, resolution) - timestamp_ms
             notes.append(NoteEvent(
-                timestamp_ms=tick * ms_per_tick,
+                timestamp_ms=timestamp_ms,
                 frets=sorted(frets),
-                duration_ms=max_dur * ms_per_tick,
+                duration_ms=duration_ms,
             ))
+
+        song_length_ms = 0.0
+        if notes:
+            song_length_ms = notes[-1].timestamp_ms + notes[-1].duration_ms
 
         return ChartData(
             notes=notes,
             instrument=instrument,
             difficulty=difficulty,
             resolution=resolution,
+            bpm_events=bpm_events,
+            song_length_ms=song_length_ms,
         )
 
     def _parse_chart_sections(self, content: str) -> Dict[str, List[str]]:
