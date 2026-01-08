@@ -71,24 +71,20 @@ class ChartParser:
         mid = mido.MidiFile(str(path))
         resolution = mid.ticks_per_beat
 
-        # find track
         target_track = None
         track_names = self.MIDI_TRACK_NAMES.get(instrument, ["PART GUITAR"])
         for track in mid.tracks:
             if track.name in track_names:
                 target_track = track
                 break
-
         if target_track is None:
             for track in mid.tracks:
                 if "GUITAR" in track.name.upper():
                     target_track = track
                     break
-
         if target_track is None:
             raise ValueError(f"No track for {instrument}")
 
-        # get tempo events
         bpm_events = []
         tick = 0
         for msg in mid.tracks[0]:
@@ -96,17 +92,53 @@ class ChartParser:
             if msg.type == "set_tempo":
                 bpm = 60000000.0 / msg.tempo
                 bpm_events.append({"tick": tick, "bpm": bpm})
-
         if not bpm_events:
             bpm_events = [{"tick": 0, "bpm": 120.0}]
 
-        # TODO: extract notes from track
+        base_note = self.MIDI_DIFFICULTY_BASE[difficulty]
+        note_range = range(base_note, base_note + 5)
+
+        active_notes: Dict[int, int] = {}
+        note_events: Dict[int, List[Tuple[int, int]]] = {}
+
+        current_tick = 0
+        for msg in target_track:
+            current_tick += msg.time
+            if msg.type == "note_on" and msg.velocity > 0:
+                if msg.note in note_range:
+                    active_notes[msg.note] = current_tick
+            elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
+                if msg.note in active_notes:
+                    start_tick = active_notes.pop(msg.note)
+                    fret = msg.note - base_note
+                    duration = current_tick - start_tick
+                    if start_tick not in note_events:
+                        note_events[start_tick] = []
+                    note_events[start_tick].append((fret, duration))
+
+        notes = []
+        for tick in sorted(note_events.keys()):
+            frets = [f for f, _ in note_events[tick]]
+            max_dur = max(d for _, d in note_events[tick])
+            timestamp_ms = self._ticks_to_ms(tick, bpm_events, resolution)
+            duration_ms = self._ticks_to_ms(tick + max_dur, bpm_events, resolution) - timestamp_ms
+            notes.append(NoteEvent(
+                timestamp_ms=timestamp_ms,
+                frets=sorted(frets),
+                duration_ms=duration_ms,
+            ))
+
+        song_length_ms = 0.0
+        if notes:
+            song_length_ms = notes[-1].timestamp_ms + notes[-1].duration_ms
+
         return ChartData(
-            notes=[],
+            notes=notes,
             instrument=instrument,
             difficulty=difficulty,
             resolution=resolution,
             bpm_events=bpm_events,
+            song_length_ms=song_length_ms,
         )
 
     def _read_chart_content(self, path: Path) -> str:
