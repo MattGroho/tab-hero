@@ -1,4 +1,4 @@
-"""Parser for .chart format files."""
+"""Parser for .chart and .mid format files."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,10 +27,24 @@ class ChartData:
 
 
 class ChartParser:
-    """Parser for .chart files."""
+    """Parser for .chart and .mid files."""
 
     INSTRUMENTS = ["lead", "bass", "rhythm", "keys"]
     DIFFICULTIES = ["easy", "medium", "hard", "expert"]
+
+    MIDI_DIFFICULTY_BASE = {
+        "easy": 60,
+        "medium": 72,
+        "hard": 84,
+        "expert": 96,
+    }
+
+    MIDI_TRACK_NAMES = {
+        "lead": ["PART GUITAR", "T1 GEMS"],
+        "bass": ["PART BASS"],
+        "rhythm": ["PART RHYTHM"],
+        "keys": ["PART KEYS"],
+    }
 
     CHART_SECTION_NAMES = {
         ("easy", "lead"): ["EasySingle"],
@@ -47,11 +61,55 @@ class ChartParser:
         path = Path(path)
         if path.suffix.lower() == ".chart":
             return self._parse_chart_file(path, instrument, difficulty)
+        elif path.suffix.lower() in [".mid", ".midi"]:
+            return self._parse_midi_file(path, instrument, difficulty)
         else:
             raise ValueError(f"Unsupported format: {path.suffix}")
 
+    def _parse_midi_file(self, path: Path, instrument: str, difficulty: str) -> ChartData:
+        import mido
+        mid = mido.MidiFile(str(path))
+        resolution = mid.ticks_per_beat
+
+        # find track
+        target_track = None
+        track_names = self.MIDI_TRACK_NAMES.get(instrument, ["PART GUITAR"])
+        for track in mid.tracks:
+            if track.name in track_names:
+                target_track = track
+                break
+
+        if target_track is None:
+            for track in mid.tracks:
+                if "GUITAR" in track.name.upper():
+                    target_track = track
+                    break
+
+        if target_track is None:
+            raise ValueError(f"No track for {instrument}")
+
+        # get tempo events
+        bpm_events = []
+        tick = 0
+        for msg in mid.tracks[0]:
+            tick += msg.time
+            if msg.type == "set_tempo":
+                bpm = 60000000.0 / msg.tempo
+                bpm_events.append({"tick": tick, "bpm": bpm})
+
+        if not bpm_events:
+            bpm_events = [{"tick": 0, "bpm": 120.0}]
+
+        # TODO: extract notes from track
+        return ChartData(
+            notes=[],
+            instrument=instrument,
+            difficulty=difficulty,
+            resolution=resolution,
+            bpm_events=bpm_events,
+        )
+
     def _read_chart_content(self, path: Path) -> str:
-        """Read chart file with encoding detection."""
         try:
             return path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -63,11 +121,9 @@ class ChartParser:
     def _ticks_to_ms(self, ticks: int, bpm_events: List[Dict], resolution: int) -> float:
         if not bpm_events:
             return ticks * (60000.0 / 120.0) / resolution
-
         current_tick = 0
         current_time_ms = 0.0
         current_bpm = 120.0
-
         for event in bpm_events:
             event_tick = event["tick"]
             if event_tick > ticks:
@@ -77,7 +133,6 @@ class ChartParser:
             current_time_ms += tick_delta * ms_per_tick
             current_tick = event_tick
             current_bpm = event["bpm"]
-
         tick_delta = ticks - current_tick
         ms_per_tick = (60000.0 / current_bpm) / resolution
         current_time_ms += tick_delta * ms_per_tick
@@ -86,7 +141,6 @@ class ChartParser:
     def _parse_chart_file(self, path: Path, instrument: str, difficulty: str) -> ChartData:
         content = self._read_chart_content(path)
         sections = self._parse_chart_sections(content)
-
         resolution = 192
         if "Song" in sections:
             for line in sections["Song"]:
@@ -94,7 +148,6 @@ class ChartParser:
                     match = re.search(r"Resolution\s*=\s*(\d+)", line)
                     if match:
                         resolution = int(match.group(1))
-
         bpm_events = []
         if "SyncTrack" in sections:
             for line in sections["SyncTrack"]:
@@ -103,10 +156,8 @@ class ChartParser:
                     tick = int(match.group(1))
                     bpm = int(match.group(2)) / 1000.0
                     bpm_events.append({"tick": tick, "bpm": bpm})
-
         if not bpm_events:
             bpm_events = [{"tick": 0, "bpm": 120.0}]
-
         section_names = self.CHART_SECTION_NAMES.get(
             (difficulty, instrument), [f"{difficulty.capitalize()}Single"]
         )
@@ -115,10 +166,8 @@ class ChartParser:
             if name in sections:
                 note_section = sections[name]
                 break
-
         if note_section is None:
             raise ValueError(f"No section for {difficulty} {instrument}")
-
         note_events: Dict[int, List[Tuple[int, int]]] = {}
         for line in note_section:
             match = re.match(r"\s*(\d+)\s*=\s*N\s+(\d+)\s+(\d+)", line)
@@ -130,7 +179,6 @@ class ChartParser:
                     if tick not in note_events:
                         note_events[tick] = []
                     note_events[tick].append((note_val, duration))
-
         notes = []
         for tick in sorted(note_events.keys()):
             frets = [f for f, _ in note_events[tick]]
@@ -142,11 +190,9 @@ class ChartParser:
                 frets=sorted(frets),
                 duration_ms=duration_ms,
             ))
-
         song_length_ms = 0.0
         if notes:
             song_length_ms = notes[-1].timestamp_ms + notes[-1].duration_ms
-
         return ChartData(
             notes=notes,
             instrument=instrument,
@@ -160,7 +206,6 @@ class ChartParser:
         sections: Dict[str, List[str]] = {}
         current_section = None
         current_lines: List[str] = []
-
         for line in content.split("\n"):
             line = line.strip()
             match = re.match(r"^\[(.+)\]$", line)
@@ -174,7 +219,6 @@ class ChartParser:
                 continue
             if current_section and line:
                 current_lines.append(line)
-
         if current_section:
             sections[current_section] = current_lines
         return sections
