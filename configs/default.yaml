@@ -1,0 +1,24 @@
+# Default preprocessing configuration
+
+audio:
+  sample_rate: 22050
+  n_mels: 128
+  n_fft: 2048
+  hop_length: 512
+  f_min: 20.0
+  f_max: 8000.0
+
+tokenizer:
+  num_frets: 5
+  max_time_delta_ms: 5000
+  time_resolution_ms: 10
+  max_duration_ms: 2000
+  duration_resolution_ms: 50
+
+preprocessing:
+  difficulties:
+    - expert
+  instruments:
+    - lead
+  min_notes: 10
+  max_duration_minutes: 15
