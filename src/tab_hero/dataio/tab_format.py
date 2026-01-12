@@ -1,140 +1,157 @@
-"""Binary format for storing preprocessed tab data.
+"""
+.tab binary format for training data.
 
-File format (.tab):
-    Header (16 bytes):
-        - Magic number: 4 bytes (b"TABH")
-        - Format version: 2 bytes (uint16)
-        - Flags: 2 bytes (reserved)
-        - Content hash: 8 bytes (xxhash64 of uncompressed content)
-    
-    Compressed payload (zlib):
-        - mel_spectrogram: float32 tensor
-        - tokens: int32 tensor
-        - metadata: JSON bytes
+This format is designed EXCLUSIVELY for training neural network weights.
+It stores preprocessed, lossy representations that CANNOT be used to
+reconstruct the original source material.
+
+Non-reconstructable by design:
+- Audio is stored as mel spectrogram (lossy, non-invertible transform)
+- Notes are stored as token IDs (time-discretized, no original timing)
+- No metadata, filenames, or identifying information is preserved
+- Files are identified only by content hash
+
+The format is intentionally one-way: source -> .tab is possible,
+but .tab -> source is not.
+
+Binary Layout:
+    4 bytes:  magic (TABH)
+    2 bytes:  version (uint16)
+    2 bytes:  difficulty_id + instrument_id (uint8 each)
+    4 bytes:  sample_rate (uint32)
+    4 bytes:  hop_length (uint32)
+    4 bytes:  n_mels (uint32)
+    4 bytes:  n_frames (uint32)
+    4 bytes:  n_tokens (uint32)
+    16 bytes: content_hash (ascii)
+    4 bytes:  compressed mel size (uint32)
+    variable: zlib compressed mel data (float16)
+    variable: token data (int16)
 """
 
-import hashlib
-import json
 import struct
+import hashlib
 import zlib
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import torch
+from dataclasses import dataclass
+from pathlib import Path
 
 
-TAB_MAGIC = b"TABH"
+# Format version
 TAB_FORMAT_VERSION = 1
+
+# Magic bytes for file identification
+TAB_MAGIC = b"TABH"
+
+# zlib compression level (6 is default, good balance)
+ZLIB_COMPRESSION_LEVEL = 6
 
 
 @dataclass
 class TabData:
-    """Container for tab file data."""
-    mel_spectrogram: torch.Tensor
-    tokens: List[int]
-    instrument: str
-    difficulty: str
-    source_audio: str
-    source_chart: str
-    duration_ms: float
+    """
+    Container for .tab file contents.
+
+    This is a training-only format. The stored representations are:
+    - Lossy (mel spectrogram cannot be inverted to audio)
+    - Time-discretized (original note timing is quantized)
+    - Anonymous (no source identification possible)
+    """
+
+    # Audio features (mel spectrogram, not raw audio)
+    # This is a lossy transform - original audio cannot be recovered
+    mel_spectrogram: np.ndarray  # (n_mels, n_frames)
+    sample_rate: int
+    hop_length: int
+
+    # Note sequence as token IDs (from ChartTokenizer)
+    # Original timing is discretized to a fixed grid
+    note_tokens: np.ndarray  # (seq_len,) int16
+
+    # Conditioning metadata (numeric IDs only, no names)
+    difficulty_id: int  # 0=easy, 1=medium, 2=hard, 3=expert
+    instrument_id: int  # 0=lead, 1=bass, 2=rhythm, 3=keys
+
+    # Content hash for deduplication only
+    content_hash: str
 
 
-def compute_content_hash(data: bytes) -> bytes:
-    """Compute 8-byte hash of content."""
-    h = hashlib.sha256(data).digest()
-    return h[:8]
+def compute_content_hash(mel: np.ndarray, tokens: np.ndarray) -> str:
+    """Compute a hash from features for deduplication."""
+    h = hashlib.sha256()
+    h.update(mel.tobytes()[:4096])  # partial hash only
+    h.update(tokens.tobytes())
+    return h.hexdigest()[:16]
 
 
-def save_tab(
-    path: Union[str, Path],
-    mel_spectrogram: torch.Tensor,
-    tokens: List[int],
-    instrument: str = "lead",
-    difficulty: str = "expert",
-    source_audio: str = "",
-    source_chart: str = "",
-    duration_ms: float = 0.0,
-) -> None:
-    """Save preprocessed data to .tab file."""
+def save_tab(data: TabData, path: Path) -> None:
+    """Save TabData to a .tab file."""
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    metadata = {
-        "instrument": instrument,
-        "difficulty": difficulty,
-        "source_audio": source_audio,
-        "source_chart": source_chart,
-        "duration_ms": duration_ms,
-        "mel_shape": list(mel_spectrogram.shape),
-        "num_tokens": len(tokens),
-    }
+    n_mels, n_frames = data.mel_spectrogram.shape
+    n_tokens = len(data.note_tokens)
 
-    mel_bytes = mel_spectrogram.numpy().astype(np.float32).tobytes()
-    token_bytes = np.array(tokens, dtype=np.int32).tobytes()
-    meta_bytes = json.dumps(metadata).encode("utf-8")
+    # Compress mel spectrogram with zlib
+    mel_f16 = data.mel_spectrogram.astype(np.float16)
+    mel_compressed = zlib.compress(mel_f16.tobytes(), level=ZLIB_COMPRESSION_LEVEL)
 
-    payload = struct.pack("<I", len(mel_bytes)) + mel_bytes
-    payload += struct.pack("<I", len(token_bytes)) + token_bytes
-    payload += struct.pack("<I", len(meta_bytes)) + meta_bytes
+    with open(path, "wb") as f:
+        f.write(TAB_MAGIC)
+        f.write(struct.pack("<H", TAB_FORMAT_VERSION))
+        f.write(struct.pack("<BB", data.difficulty_id, data.instrument_id))
+        f.write(struct.pack("<I", data.sample_rate))
+        f.write(struct.pack("<I", data.hop_length))
+        f.write(struct.pack("<I", n_mels))
+        f.write(struct.pack("<I", n_frames))
+        f.write(struct.pack("<I", n_tokens))
+        f.write(data.content_hash.encode("ascii").ljust(16, b"\x00"))
 
-    content_hash = compute_content_hash(payload)
-    compressed = zlib.compress(payload, level=6)
+        # Write compressed mel size then data
+        f.write(struct.pack("<I", len(mel_compressed)))
+        f.write(mel_compressed)
 
-    header = TAB_MAGIC
-    header += struct.pack("<H", TAB_FORMAT_VERSION)
-    header += struct.pack("<H", 0)
-    header += content_hash
-
-    path.write_bytes(header + compressed)
+        # Write tokens
+        tokens_i16 = data.note_tokens.astype(np.int16)
+        f.write(tokens_i16.tobytes())
 
 
-def load_tab(path: Union[str, Path]) -> TabData:
-    """Load preprocessed data from .tab file."""
-    path = Path(path)
-    data = path.read_bytes()
+def load_tab(path: Path) -> TabData:
+    """Load a .tab file."""
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        if magic != TAB_MAGIC:
+            raise ValueError(f"Invalid .tab file: bad magic {magic}")
 
-    if data[:4] != TAB_MAGIC:
-        raise ValueError(f"Invalid magic: {data[:4]}")
+        version = struct.unpack("<H", f.read(2))[0]
+        if version > TAB_FORMAT_VERSION:
+            raise ValueError(f"Unsupported .tab version {version}")
 
-    version = struct.unpack("<H", data[4:6])[0]
-    if version != TAB_FORMAT_VERSION:
-        raise ValueError(f"Unsupported version: {version}")
+        difficulty_id, instrument_id = struct.unpack("<BB", f.read(2))
+        sample_rate = struct.unpack("<I", f.read(4))[0]
+        hop_length = struct.unpack("<I", f.read(4))[0]
+        n_mels = struct.unpack("<I", f.read(4))[0]
+        n_frames = struct.unpack("<I", f.read(4))[0]
+        n_tokens = struct.unpack("<I", f.read(4))[0]
+        content_hash = f.read(16).rstrip(b"\x00").decode("ascii")
 
-    stored_hash = data[8:16]
-    compressed = data[16:]
-    payload = zlib.decompress(compressed)
+        mel_size = struct.unpack("<I", f.read(4))[0]
+        mel_compressed = f.read(mel_size)
+        mel_bytes = zlib.decompress(mel_compressed)
 
-    actual_hash = compute_content_hash(payload)
-    if stored_hash != actual_hash:
-        raise ValueError("Content hash mismatch")
+        mel = np.frombuffer(mel_bytes, dtype=np.float16).reshape(n_mels, n_frames)
+        mel = mel.astype(np.float32)
 
-    offset = 0
-    mel_len = struct.unpack("<I", payload[offset:offset+4])[0]
-    offset += 4
-    mel_bytes = payload[offset:offset+mel_len]
-    offset += mel_len
-
-    token_len = struct.unpack("<I", payload[offset:offset+4])[0]
-    offset += 4
-    token_bytes = payload[offset:offset+token_len]
-    offset += token_len
-
-    meta_len = struct.unpack("<I", payload[offset:offset+4])[0]
-    offset += 4
-    meta_bytes = payload[offset:offset+meta_len]
-
-    metadata = json.loads(meta_bytes.decode("utf-8"))
-    mel_array = np.frombuffer(mel_bytes, dtype=np.float32)
-    mel_spectrogram = torch.from_numpy(mel_array.reshape(metadata["mel_shape"]))
-    tokens = np.frombuffer(token_bytes, dtype=np.int32).tolist()
+        tokens = np.frombuffer(f.read(n_tokens * 2), dtype=np.int16)
 
     return TabData(
-        mel_spectrogram=mel_spectrogram,
-        tokens=tokens,
-        instrument=metadata["instrument"],
-        difficulty=metadata["difficulty"],
-        source_audio=metadata["source_audio"],
-        source_chart=metadata["source_chart"],
-        duration_ms=metadata["duration_ms"],
+        mel_spectrogram=mel,
+        sample_rate=sample_rate,
+        hop_length=hop_length,
+        note_tokens=tokens,
+        difficulty_id=difficulty_id,
+        instrument_id=instrument_id,
+        content_hash=content_hash,
     )
+
