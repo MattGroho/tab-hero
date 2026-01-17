@@ -1,151 +1,466 @@
-"""Preprocessing pipeline for Clone Hero songs.
+"""Preprocessing pipeline for audio/charts to .tab format."""
 
-Discovers songs, extracts audio features, parses charts, and saves
-preprocessed data in .tab format.
-"""
-
-import os
 from pathlib import Path
-from typing import Dict, Generator, List, Optional, Tuple, Union
-
+from typing import Any, Dict, List, Optional, Set, Tuple
+import hashlib
 import numpy as np
+
 import torch
-from tqdm import tqdm
+import torchaudio
 
-from .audio_processor import AudioProcessor, DEFAULT_MEL_CONFIG
-from .chart_parser import ChartParser, ChartData
-from .tab_format import save_tab
-from .tokenizer import ChartTokenizer, TokenizerConfig
+from tab_hero.dataio.chart_parser import ChartParser
+from tab_hero.dataio.tokenizer import ChartTokenizer
+from tab_hero.dataio.tab_format import TabData, save_tab, compute_content_hash
+from tab_hero.dataio.source_separation import (
+    check_demucs_available,
+    compute_stem_rms,
+    find_preexisting_stems,
+    separate_audio_stems,
+    INSTRUMENT_TO_STEM,
+    MIN_STEM_RMS,
+)
 
+DIFFICULTY_MAP: Dict[str, int] = {"easy": 0, "medium": 1, "hard": 2, "expert": 3}
+INSTRUMENT_MAP: Dict[str, int] = {"lead": 0, "bass": 1, "rhythm": 2, "keys": 3}
 
-DIFFICULTY_MAP = {
-    "easy": "easy",
-    "medium": "medium",
-    "hard": "hard",
-    "expert": "expert",
+MEL_CONFIG: Dict[str, int] = {
+    "sample_rate": 22050,
+    "n_fft": 2048,
+    "hop_length": 256,  # ~11.6ms per frame
+    "n_mels": 128,
 }
 
-INSTRUMENT_MAP = {
-    "lead": "lead",
-    "guitar": "lead",
-    "bass": "bass",
-    "rhythm": "rhythm",
-    "keys": "keys",
-}
+# Cached transforms (lazy-initialized, separate CPU/GPU caches)
+_mel_transform_cpu: Optional[torchaudio.transforms.MelSpectrogram] = None
+_mel_transform_gpu: Optional[torchaudio.transforms.MelSpectrogram] = None
+_resampler_44100_to_22050: Optional[torchaudio.transforms.Resample] = None
 
-AUDIO_EXTENSIONS = {".ogg", ".mp3", ".wav", ".opus"}
-CHART_EXTENSIONS = {".chart", ".mid", ".midi"}
+
+def get_mel_transform(device: str = "cpu") -> torchaudio.transforms.MelSpectrogram:
+    """Get cached MelSpectrogram transform for the given device."""
+    global _mel_transform_cpu, _mel_transform_gpu
+
+    if device == "cpu" or not torch.cuda.is_available():
+        if _mel_transform_cpu is None:
+            _mel_transform_cpu = torchaudio.transforms.MelSpectrogram(
+                sample_rate=MEL_CONFIG["sample_rate"],
+                n_fft=MEL_CONFIG["n_fft"],
+                hop_length=MEL_CONFIG["hop_length"],
+                n_mels=MEL_CONFIG["n_mels"],
+            )
+        return _mel_transform_cpu
+    else:
+        if _mel_transform_gpu is None:
+            _mel_transform_gpu = torchaudio.transforms.MelSpectrogram(
+                sample_rate=MEL_CONFIG["sample_rate"],
+                n_fft=MEL_CONFIG["n_fft"],
+                hop_length=MEL_CONFIG["hop_length"],
+                n_mels=MEL_CONFIG["n_mels"],
+            ).cuda()
+        return _mel_transform_gpu
+
+
+def get_resampler(orig_sr: int, target_sr: int) -> torchaudio.transforms.Resample:
+    """Get cached resampler. Caches 44100->22050 (Demucs output)."""
+    global _resampler_44100_to_22050
+
+    if orig_sr == 44100 and target_sr == 22050:
+        if _resampler_44100_to_22050 is None:
+            _resampler_44100_to_22050 = torchaudio.transforms.Resample(44100, 22050)
+        return _resampler_44100_to_22050
+    return torchaudio.transforms.Resample(orig_sr, target_sr)
+
+
+def compute_audio_hash(audio_path: Path) -> str:
+    """Compute MD5 hash of audio file (truncated to 12 hex chars)."""
+    return hashlib.md5(audio_path.read_bytes()).hexdigest()[:12]
+
+
+def get_mel_cache_path(cache_dir: Path, audio_hash: str, stem_name: str) -> Path:
+    """Get cache file path for a mel spectrogram."""
+    return cache_dir / f"{audio_hash}_{stem_name}_mel.npz"
+
+
+def save_mel_to_cache(
+    cache_path: Path,
+    mel: np.ndarray,
+    sample_rate: int,
+    duration_sec: float,
+) -> bool:
+    """Save mel to cache as compressed npz. Returns True on success."""
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            cache_path,
+            mel=mel.astype(np.float16),  # float16 for space savings
+            sample_rate=sample_rate,
+            duration_sec=duration_sec,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def load_mel_from_cache(
+    cache_path: Path,
+) -> Optional[Tuple[np.ndarray, int, float]]:
+    """Load mel from cache. Returns (mel, sample_rate, duration) or None."""
+    if not cache_path.exists():
+        return None
+    try:
+        data = np.load(cache_path)
+        return data["mel"].astype(np.float32), int(data["sample_rate"]), float(data["duration_sec"])
+    except Exception:
+        return None
 
 
 def find_audio_file(song_dir: Path) -> Optional[Path]:
-    """Find the main audio file in a song directory."""
-    for name in ["song", "guitar", "audio"]:
-        for ext in AUDIO_EXTENSIONS:
-            path = song_dir / f"{name}{ext}"
-            if path.exists():
-                return path
-    for path in song_dir.iterdir():
-        if path.suffix.lower() in AUDIO_EXTENSIONS:
-            return path
+    """Find the primary audio file in a song directory."""
+    for name in ["song.ogg", "guitar.ogg", "song.mp3", "song.wav"]:
+        p = song_dir / name
+        if p.exists():
+            return p
+    for ext in [".ogg", ".mp3", ".wav", ".mp4", ".m4a"]:
+        files = list(song_dir.glob(f"*{ext}"))
+        if files:
+            return files[0]
     return None
 
 
 def find_chart_file(song_dir: Path) -> Optional[Path]:
     """Find the chart file in a song directory."""
-    for name in ["notes"]:
-        for ext in CHART_EXTENSIONS:
-            path = song_dir / f"{name}{ext}"
-            if path.exists():
-                return path
-    for path in song_dir.iterdir():
-        if path.suffix.lower() in CHART_EXTENSIONS:
-            return path
+    for name in ["notes.chart", "notes.mid"]:
+        p = song_dir / name
+        if p.exists():
+            return p
+    for ext in [".chart", ".mid", ".midi"]:
+        files = list(song_dir.glob(f"*{ext}"))
+        if files:
+            return files[0]
     return None
 
 
 def is_song_directory(path: Path) -> bool:
-    """Check if directory contains a valid song."""
-    if not path.is_dir():
-        return False
+    """Check if a directory contains song files (audio + chart)."""
     return find_audio_file(path) is not None and find_chart_file(path) is not None
 
 
-def discover_song_directories(root: Path) -> Generator[Path, None, None]:
-    """Recursively find all song directories."""
-    root = Path(root)
-    if is_song_directory(root):
-        yield root
-        return
-    for entry in root.iterdir():
-        if entry.is_dir():
-            yield from discover_song_directories(entry)
+def discover_song_directories(root: Path) -> List[Path]:
+    """Recursively discover all song directories under root."""
+    song_dirs = []
+
+    def _search(path: Path):
+        if is_song_directory(path):
+            song_dirs.append(path)
+        else:
+            for child in path.iterdir():
+                if child.is_dir():
+                    _search(child)
+
+    _search(root)
+    return song_dirs
+
+
+def load_audio(audio_path: Path) -> Tuple[torch.Tensor, int]:
+    """Load audio file using available backend."""
+    try:
+        waveform, sr = torchaudio.load(str(audio_path))
+        return waveform, sr
+    except (ImportError, RuntimeError):
+        pass
+
+    try:
+        import librosa
+        waveform, sr = librosa.load(str(audio_path), sr=None, mono=False)
+        if waveform.ndim == 1:
+            waveform = waveform[np.newaxis, :]
+        return torch.from_numpy(waveform.astype(np.float32)), sr
+    except ImportError:
+        pass
+
+    import soundfile as sf
+    waveform, sr = sf.read(str(audio_path))
+    if waveform.ndim == 1:
+        waveform = waveform[np.newaxis, :]
+    else:
+        waveform = waveform.T
+    return torch.from_numpy(waveform.astype(np.float32)), sr
+
+
+def waveform_to_mel(
+    waveform: torch.Tensor,
+    sr: int,
+    normalize: bool = True,
+    use_gpu: bool = False,
+) -> Tuple[np.ndarray, int, float]:
+    """Convert waveform to mel spectrogram. Returns (mel, sample_rate, duration_sec)."""
+    device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
+
+    if sr != MEL_CONFIG["sample_rate"]:
+        waveform = get_resampler(sr, MEL_CONFIG["sample_rate"])(waveform)
+        sr = MEL_CONFIG["sample_rate"]
+
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+
+    duration_sec = waveform.shape[1] / sr
+
+    if device == "cuda":
+        waveform = waveform.cuda()
+
+    mel = get_mel_transform(device)(waveform)
+    mel = torch.log(mel.clamp(min=1e-5))
+
+    if normalize:
+        mel_std = mel.std()
+        if mel_std > 1e-6:
+            mel = (mel - mel.mean()) / mel_std
+
+    return mel.squeeze(0).cpu().numpy(), MEL_CONFIG["sample_rate"], duration_sec
 
 
 def extract_mel_spectrogram(
     audio_path: Path,
-    processor: Optional[AudioProcessor] = None,
-) -> Tuple[torch.Tensor, float]:
+    normalize: bool = True
+) -> Tuple[np.ndarray, int, float]:
     """Extract mel spectrogram from audio file."""
-    if processor is None:
-        processor = AudioProcessor()
-    mel = processor.process_audio_file(audio_path)
-    duration_ms = processor.get_duration_ms(mel)
-    return mel, duration_ms
+    waveform, sr = load_audio(audio_path)
+    return waveform_to_mel(waveform, sr, normalize)
 
 
-def process_song_all_variants(
-    song_dir: Path,
-    output_dir: Path,
-    difficulties: Optional[List[str]] = None,
-    instruments: Optional[List[str]] = None,
-    audio_processor: Optional[AudioProcessor] = None,
-    chart_parser: Optional[ChartParser] = None,
-    tokenizer: Optional[ChartTokenizer] = None,
-) -> List[Path]:
-    """Process a song for all difficulty/instrument combinations."""
-    if difficulties is None:
-        difficulties = ["expert"]
-    if instruments is None:
-        instruments = ["lead"]
+def process_song_all_variants(args: Tuple) -> Dict[str, Any]:
+    """
+    Process a single song for all difficulty/instrument combinations.
+
+    Args:
+        args: (song_dir, output_dir, difficulties, instruments, filters)
+              filters dict may contain: min_notes, min_duration, max_duration,
+              use_separation, stem_cache_dir, parser, tokenizer, use_gpu_mel
+    """
+    song_dir, output_dir, difficulties, instruments, filters = args
 
     audio_path = find_audio_file(song_dir)
     chart_path = find_chart_file(song_dir)
 
     if audio_path is None or chart_path is None:
-        return []
+        n_variants = len(difficulties) * len(instruments)
+        return {"successful": 0, "skipped": n_variants, "errors": 0,
+                "song_dir": str(song_dir), "error_msgs": [], "duration_sec": 0}
 
-    if audio_processor is None:
-        audio_processor = AudioProcessor()
-    if chart_parser is None:
-        chart_parser = ChartParser()
-    if tokenizer is None:
-        tokenizer = ChartTokenizer()
+    use_separation = filters.get("use_separation", True)
+    stem_cache_dir = filters.get("stem_cache_dir")
+    min_stem_rms = filters.get("min_stem_rms", MIN_STEM_RMS)
+    use_gpu_mel = filters.get("use_gpu_mel", True)
 
-    mel, duration_ms = extract_mel_spectrogram(audio_path, audio_processor)
+    # Reuse parser/tokenizer from filters if provided, otherwise create new
+    parser = filters.get("parser") or ChartParser()
+    tokenizer = filters.get("tokenizer") or ChartTokenizer()
 
-    output_files = []
+    # Determine which stems we need based on requested instruments
+    needed_stems: Set[str] = set()
+    for inst in instruments:
+        needed_stems.add(INSTRUMENT_TO_STEM.get(inst, "other"))
+
+    stem_mels: Dict[str, Tuple[np.ndarray, int, float]] = {}
+    skipped_stems: Set[str] = set()
+    duration_sec = 0.0
+
+    # Compute audio hash for mel caching (if cache enabled)
+    audio_hash = compute_audio_hash(audio_path) if stem_cache_dir else None
+
+    try:
+        # First, check mel cache for all needed stems
+        if stem_cache_dir and audio_hash:
+            for stem_name in list(needed_stems):
+                cache_path = get_mel_cache_path(stem_cache_dir, audio_hash, stem_name)
+                cached_mel = load_mel_from_cache(cache_path)
+                if cached_mel is not None:
+                    mel, sr, dur = cached_mel
+                    stem_mels[stem_name] = (mel, sr, dur)
+                    duration_sec = max(duration_sec, dur)
+
+        # Check for pre-existing stems (from song packs) for remaining stems
+        remaining_after_cache = needed_stems - set(stem_mels.keys())
+        preexisting = find_preexisting_stems(song_dir)
+        has_preexisting_stems = len(preexisting) > 0
+
+        for stem_name in remaining_after_cache:
+            if stem_name in preexisting:
+                stem_path = preexisting[stem_name]
+                waveform, stem_sr = load_audio(stem_path)
+                rms = compute_stem_rms(waveform)
+                if rms < min_stem_rms:
+                    skipped_stems.add(stem_name)
+                    continue
+                # Pre-existing stems are on CPU, use CPU mel
+                mel, sr, dur = waveform_to_mel(waveform, stem_sr, use_gpu=False)
+                stem_mels[stem_name] = (mel, sr, dur)
+                duration_sec = max(duration_sec, dur)
+                # Cache the mel for future runs
+                if stem_cache_dir and audio_hash:
+                    cache_path = get_mel_cache_path(stem_cache_dir, audio_hash, stem_name)
+                    save_mel_to_cache(cache_path, mel, sr, dur)
+                # Free waveform
+                del waveform
+
+        remaining_stems = needed_stems - set(stem_mels.keys()) - skipped_stems
+
+        # If pre-existing stems were found, don't run Demucs for missing stems
+        # Missing stems in a pre-separated pack likely means they don't exist in the song
+        if remaining_stems and not has_preexisting_stems:
+            if use_separation and check_demucs_available():
+                waveform, audio_sr = load_audio(audio_path)
+                stems = separate_audio_stems(
+                    waveform, audio_sr,
+                    cache_dir=None,  # Don't cache raw stems, we cache mels instead
+                    audio_path=audio_path
+                )
+                # Free input waveform immediately
+                del waveform
+                demucs_sr = 44100
+
+                for stem_name in remaining_stems:
+                    stem_wav = None
+                    if stem_name in stems:
+                        stem_wav = stems[stem_name]
+                    elif "other" in stems:
+                        stem_wav = stems["other"]
+
+                    if stem_wav is not None:
+                        rms = compute_stem_rms(stem_wav)
+                        if rms < min_stem_rms:
+                            skipped_stems.add(stem_name)
+                            continue
+                        # Demucs output benefits from GPU mel extraction
+                        mel, sr, dur = waveform_to_mel(
+                            stem_wav, demucs_sr, use_gpu=use_gpu_mel
+                        )
+                        stem_mels[stem_name] = (mel, sr, dur)
+                        duration_sec = max(duration_sec, dur)
+                        # Cache the mel for future runs
+                        if stem_cache_dir and audio_hash:
+                            cache_path = get_mel_cache_path(
+                                stem_cache_dir, audio_hash, stem_name
+                            )
+                            save_mel_to_cache(cache_path, mel, sr, dur)
+
+                # Free stems after processing to prevent memory buildup
+                del stems
+                import gc
+                gc.collect()
+            else:
+                mel, sr, duration_sec = extract_mel_spectrogram(audio_path)
+                for stem_name in remaining_stems:
+                    stem_mels[stem_name] = (mel, sr, duration_sec)
+                    # Cache mixed audio mel too
+                    if stem_cache_dir and audio_hash:
+                        cache_path = get_mel_cache_path(
+                            stem_cache_dir, audio_hash, stem_name
+                        )
+                        save_mel_to_cache(cache_path, mel, sr, duration_sec)
+
+    except Exception as e:
+        n_variants = len(difficulties) * len(instruments)
+        return {"successful": 0, "skipped": 0, "errors": n_variants,
+                "song_dir": str(song_dir), "error_msgs": [f"Audio error: {e}"],
+                "duration_sec": 0}
+
+    # Apply duration filters
+    min_duration = filters.get("min_duration")
+    max_duration = filters.get("max_duration")
+    if min_duration is not None and duration_sec < min_duration:
+        n_variants = len(difficulties) * len(instruments)
+        return {"successful": 0, "skipped": n_variants, "errors": 0,
+                "song_dir": str(song_dir),
+                "error_msgs": [f"Duration {duration_sec:.1f}s < min {min_duration}s"],
+                "duration_sec": duration_sec}
+    if max_duration is not None and duration_sec > max_duration:
+        n_variants = len(difficulties) * len(instruments)
+        return {"successful": 0, "skipped": n_variants, "errors": 0,
+                "song_dir": str(song_dir),
+                "error_msgs": [f"Duration {duration_sec:.1f}s > max {max_duration}s"],
+                "duration_sec": duration_sec}
+
+    min_notes = filters.get("min_notes", 1)
+
+    successful = 0
+    skipped = 0
+    errors = 0
+    error_msgs: List[str] = []
+
     for difficulty in difficulties:
         for instrument in instruments:
             try:
-                chart = chart_parser.parse(chart_path, instrument, difficulty)
-                tokens = tokenizer.encode_chart(chart)
-
-                output_name = f"{song_dir.name}_{instrument}_{difficulty}.tab"
-                output_path = output_dir / output_name
-                output_dir.mkdir(parents=True, exist_ok=True)
-
-                save_tab(
-                    output_path,
-                    mel_spectrogram=mel,
-                    tokens=tokens,
-                    instrument=instrument,
-                    difficulty=difficulty,
-                    source_audio=str(audio_path.name),
-                    source_chart=str(chart_path.name),
-                    duration_ms=duration_ms,
+                chart_data = parser.parse(
+                    chart_path, instrument=instrument, difficulty=difficulty
                 )
-                output_files.append(output_path)
-            except Exception:
-                continue
 
-    return output_files
+                if len(chart_data.notes) < min_notes:
+                    skipped += 1
+                    continue
+
+                tokens = tokenizer.encode_chart(chart_data)
+                tokens = np.array(tokens, dtype=np.int16)
+
+                stem_name = INSTRUMENT_TO_STEM.get(instrument, "other")
+                mel, sr, _ = stem_mels.get(
+                    stem_name, stem_mels.get("other", (None, 0, 0))
+                )
+                if mel is None:
+                    skipped += 1
+                    continue
+
+                content_hash = compute_content_hash(mel, tokens)
+                variant_hash = hashlib.sha256(
+                    f"{content_hash}_{difficulty}_{instrument}".encode()
+                ).hexdigest()[:16]
+
+                tab_data = TabData(
+                    mel_spectrogram=mel,
+                    sample_rate=sr,
+                    hop_length=MEL_CONFIG["hop_length"],
+                    note_tokens=tokens,
+                    difficulty_id=DIFFICULTY_MAP[difficulty],
+                    instrument_id=INSTRUMENT_MAP[instrument],
+                    content_hash=variant_hash,
+                )
+
+                out_path = output_dir / f"{variant_hash}.tab"
+                if out_path.exists():
+                    skipped += 1
+                    continue
+                save_tab(tab_data, out_path)
+                successful += 1
+
+            except ValueError:
+                skipped += 1
+            except Exception as e:
+                errors += 1
+                if len(error_msgs) < 3:
+                    error_msgs.append(f"{difficulty}/{instrument}: {e}")
+
+    return {
+        "successful": successful,
+        "skipped": skipped,
+        "errors": errors,
+        "song_dir": str(song_dir),
+        "error_msgs": error_msgs,
+        "duration_sec": duration_sec,
+    }
+
+
+def cleanup_source_directory(song_dir: Path) -> None:
+    """Remove all source files from a song directory after processing."""
+    for f in song_dir.iterdir():
+        if f.is_file():
+            f.unlink()
+
+    try:
+        song_dir.rmdir()
+        parent = song_dir.parent
+        while parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+    except OSError:
+        pass
+
