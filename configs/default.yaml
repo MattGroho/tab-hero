@@ -1,24 +1,67 @@
-# Default preprocessing configuration
+# Tab Hero - Default Configuration
+#
+# This configuration file uses Hydra for hierarchical config management.
+# Override values via command line: python train.py model.encoder_dim=768
 
+# Data configuration
+data:
+  data_dir: "data/processed"  # Directory containing .tab files
+  use_tab_format: true        # Use preprocessed .tab files (faster, recommended)
+  train_split: "train"        # Split to use for training (from manifest.json)
+  val_split: "val"            # Split to use for validation (from manifest.json)
+  instrument: "lead"          # Only used when use_tab_format=false
+  difficulty: "expert"        # Only used when use_tab_format=false
+  max_audio_duration_s: 60.0  # Max audio length (raw mode only)
+  max_sequence_length: 4096   # Max token sequence length
+  max_mel_frames: 4096        # Max mel frames (.tab mode only)
+  batch_size: 4               # Reduce if OOM
+  num_workers: 0              # Set >0 for multiprocessing (may cause issues)
+  max_samples: null           # Set to limit samples for testing (e.g., 100)
+
+# Audio processing (must match preprocessing MEL_CONFIG)
 audio:
-  sample_rate: 22050
-  n_mels: 128
-  n_fft: 2048
-  hop_length: 512
-  f_min: 20.0
-  f_max: 8000.0
+  sample_rate: 22050          # Audio sample rate
+  hop_length: 256             # Mel spectrogram hop length
+  n_mels: 128                 # Number of mel bands
+  frame_rate: 86.1            # Derived: sample_rate / hop_length
 
-tokenizer:
-  num_frets: 5
-  max_time_delta_ms: 5000
-  time_resolution_ms: 10
-  max_duration_ms: 2000
-  duration_resolution_ms: 50
+# Model architecture
+model:
+  audio_input_dim: 128   # Mel spectrogram bins (n_mels) or Encodec dimension
+  encoder_dim: 512
+  decoder_dim: 512
+  n_decoder_layers: 6
+  n_heads: 8
+  ffn_dim: 2048
+  max_seq_len: 4096
+  dropout: 0.1
+  audio_downsample: 2    # Downsample audio frames by this factor
 
-preprocessing:
-  difficulties:
-    - expert
-  instruments:
-    - lead
-  min_notes: 10
-  max_duration_minutes: 15
+# Training configuration
+training:
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  max_epochs: 100
+  warmup_steps: 1000
+  gradient_clip: 1.0
+  checkpoint_dir: "checkpoints"
+  log_every_n_steps: 100
+  val_every_n_epochs: 1
+
+# Inference configuration
+inference:
+  temperature: 1.0
+  top_k: 50
+  top_p: 0.95
+
+# Logging
+logging:
+  wandb_project: null    # Set to enable W&B logging
+  wandb_entity: null
+  log_level: "INFO"
+
+# Hardware
+hardware:
+  device: "cuda"
+  precision: "bf16"
+  compile: false  # torch.compile (may have issues on some systems)
