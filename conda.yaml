@@ -1,0 +1,21 @@
+# Tab Hero - Conda Environment Configuration
+#
+# Usage:
+#   conda env create -f conda.yaml
+#   conda activate tab-hero
+
+name: tab-hero
+
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pytorch-cuda=12.8
+  - ffmpeg>=6.0
+  - pip>=23.0
+  - pip:
+      - -r requirements.txt
