@@ -102,7 +102,7 @@ The preprocessor supports resuming interrupted runs and caching separated stems.
 Training is configured via [Hydra](https://hydra.cc/). Configuration files live in `configs/`.
 
 ```bash
-# Default (Base model)
+# Default (Large model, as specified in configs/default.yaml)
 python scripts/train.py
 
 # Select a model size
@@ -117,7 +117,6 @@ Key training features:
 - Mixed precision (bf16) with gradient accumulation
 - Cosine annealing + warmup learning rate schedule
 - Early stopping and top-k checkpoint management
-- [Weights & Biases](https://wandb.ai/) experiment tracking
 
 ### Generation
 
