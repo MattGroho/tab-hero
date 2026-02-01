@@ -3,6 +3,9 @@
 # Usage:
 #   conda env create -f conda.yaml
 #   conda activate tab-hero
+#
+# This environment file installs Python and pip, then uses pip to install
+# all dependencies from requirements.txt to ensure version consistency.
 
 name: tab-hero
 
@@ -13,9 +16,19 @@ channels:
   - defaults
 
 dependencies:
+  # Python version
   - python=3.11
+
+  # CUDA support (adjust version as needed for your GPU)
   - pytorch-cuda=12.8
+
+  # Audio processing
   - ffmpeg>=6.0
+
+  # Build tools
   - pip>=23.0
+
+  # Install all other dependencies via pip from requirements.txt
   - pip:
       - -r requirements.txt
+
