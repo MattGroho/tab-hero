@@ -10,6 +10,7 @@ Non-reconstructable by design:
 - Notes are stored as token IDs (time-discretized, no original timing)
 - No metadata, filenames, or identifying information is preserved
 - Files are identified only by content hash
+- song_id is a sequential index with no connection to source
 
 The format is intentionally one-way: source -> .tab is possible,
 but .tab -> source is not.
@@ -24,6 +25,7 @@ Binary Layout:
     4 bytes:  n_frames (uint32)
     4 bytes:  n_tokens (uint32)
     16 bytes: content_hash (ascii)
+    4 bytes:  song_id (uint32) - groups variants of same song
     4 bytes:  compressed mel size (uint32)
     variable: zlib compressed mel data (float16)
     variable: token data (int16)
@@ -76,6 +78,10 @@ class TabData:
     # Content hash for deduplication only
     content_hash: str
 
+    # Song identifier - groups all variants (difficulty/instrument) of the same song
+    # This is a sequential index assigned during preprocessing, not reversible to source
+    song_id: int = 0
+
 
 def compute_content_hash(mel: np.ndarray, tokens: np.ndarray) -> str:
     """Compute a hash from features for deduplication."""
@@ -107,6 +113,7 @@ def save_tab(data: TabData, path: Path) -> None:
         f.write(struct.pack("<I", n_frames))
         f.write(struct.pack("<I", n_tokens))
         f.write(data.content_hash.encode("ascii").ljust(16, b"\x00"))
+        f.write(struct.pack("<I", data.song_id))
 
         # Write compressed mel size then data
         f.write(struct.pack("<I", len(mel_compressed)))
@@ -135,6 +142,7 @@ def load_tab(path: Path) -> TabData:
         n_frames = struct.unpack("<I", f.read(4))[0]
         n_tokens = struct.unpack("<I", f.read(4))[0]
         content_hash = f.read(16).rstrip(b"\x00").decode("ascii")
+        song_id = struct.unpack("<I", f.read(4))[0]
 
         mel_size = struct.unpack("<I", f.read(4))[0]
         mel_compressed = f.read(mel_size)
@@ -153,5 +161,6 @@ def load_tab(path: Path) -> TabData:
         difficulty_id=difficulty_id,
         instrument_id=instrument_id,
         content_hash=content_hash,
+        song_id=song_id,
     )
 

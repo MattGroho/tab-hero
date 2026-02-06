@@ -182,10 +182,11 @@ def extract_features_from_file(path: Path, tokenizer: Optional[ChartTokenizer] =
     return extract_features(load_tab(path), tokenizer)
 
 
-def _extract_single_file(path: Path) -> Optional[TabFeatures]:
-    """Worker for parallel extraction."""
+def _extract_single_file(path: Path) -> Optional[tuple[TabFeatures, str]]:
+    """Worker for parallel extraction. Returns (features, filename)."""
     try:
-        return extract_features(load_tab(path), ChartTokenizer())
+        features = extract_features(load_tab(path), ChartTokenizer())
+        return (features, path.name)
     except Exception as e:
         print(f"Error processing {path}: {e}")
         return None
@@ -220,7 +221,88 @@ def extract_features_batch(
         for future in iterator:
             result = future.result()
             if result is not None:
-                results.append(result)
+                results.append(result[0])  # Just the features, not filename
 
+    return results
+
+
+def extract_features_batch_incremental(
+    paths: List[Path],
+    output_path: Path,
+    tokenizer: Optional[ChartTokenizer] = None,
+    progress: bool = True,
+    n_workers: Optional[int] = None,
+    save_interval: int = 100,
+) -> List[TabFeatures]:
+    """Extract features with incremental saving for resume support.
+
+    Writes results to JSONL file incrementally to prevent data loss.
+    Each line includes source_file for resume tracking.
+    """
+    import json
+
+    results: List[TabFeatures] = []
+    pending_writes: List[tuple[TabFeatures, str]] = []
+
+    def flush_to_disk():
+        """Append pending results to JSONL file."""
+        nonlocal pending_writes
+        if not pending_writes:
+            return
+        with open(output_path, "a") as f:
+            for feat, filename in pending_writes:
+                data = feat.to_dict()
+                data["source_file"] = filename
+                f.write(json.dumps(data) + "\n")
+        pending_writes = []
+
+    if n_workers is None:
+        # Sequential mode
+        tokenizer = tokenizer or ChartTokenizer()
+        iterator = tqdm(paths, desc="Extracting features") if progress else paths
+
+        for i, path in enumerate(iterator):
+            try:
+                feat = extract_features(load_tab(path), tokenizer)
+                results.append(feat)
+                pending_writes.append((feat, path.name))
+
+                # Save periodically
+                if (i + 1) % save_interval == 0:
+                    flush_to_disk()
+                    if progress and hasattr(iterator, "set_postfix"):
+                        iterator.set_postfix(saved=len(results))
+            except Exception as e:
+                print(f"Error processing {path}: {e}")
+
+        # Final flush
+        flush_to_disk()
+        return results
+
+    # Parallel mode
+    if n_workers == 0:
+        n_workers = mp.cpu_count()
+
+    processed_count = 0
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_extract_single_file, p): p for p in paths}
+        iterator = tqdm(as_completed(futures), total=len(paths), desc="Extracting features") if progress else as_completed(futures)
+
+        for future in iterator:
+            result = future.result()
+            if result is not None:
+                feat, filename = result
+                results.append(feat)
+                pending_writes.append((feat, filename))
+                processed_count += 1
+
+                # Save periodically
+                if processed_count % save_interval == 0:
+                    flush_to_disk()
+                    if progress and hasattr(iterator, "set_postfix"):
+                        iterator.set_postfix(saved=len(results))
+
+    # Final flush
+    flush_to_disk()
     return results
 
