@@ -1,7 +1,7 @@
 """Tokenizer for .chart note sequences. Notes -> [TIME_DELTA, FRET, MODIFIER, DURATION] quads."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional
 import itertools
 import json
 from pathlib import Path
