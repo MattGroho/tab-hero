@@ -1,37 +1,35 @@
-"""
-Feature extraction from .tab files for time-domain analysis.
+"""Feature extraction from .tab files."""
 
-Extracts de-identified features that can be rejoined via content_hash.
-Designed for downstream ML analysis without exposing source audio.
-"""
-
+import multiprocessing as mp
+import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional
+
 import numpy as np
+from tqdm import tqdm
 
 from tab_hero.dataio.tab_format import TabData, load_tab
 from tab_hero.dataio.tokenizer import ChartTokenizer
 
 
 def _entropy(probs: np.ndarray) -> float:
-    """Compute Shannon entropy of probability distribution."""
-    probs = probs[probs > 0]  # Filter zeros to avoid log(0)
+    """Shannon entropy of a probability distribution."""
+    probs = probs[probs > 0]
     return float(-np.sum(probs * np.log(probs)))
 
 
 @dataclass
 class TabFeatures:
-    """De-identified features extracted from a .tab file."""
+    """Features extracted from a .tab file, keyed by content_hash."""
 
-    # Key for rejoining with .tab files
     content_hash: str
-
-    # Metadata (de-identified)
     difficulty_id: int
     instrument_id: int
+    song_id: int
 
-    # Time-domain features (from mel spectrogram)
+    # Audio features
     duration_sec: float
     rms_energy_mean: float
     rms_energy_std: float
@@ -39,8 +37,11 @@ class TabFeatures:
     amplitude_envelope_max: float
     amplitude_envelope_range: float
     tempo_bpm: float
+    mel_rms_mean: float
+    mel_rms_std: float
+    spectral_centroid_mean: float
 
-    # Note-based features
+    # Note statistics
     n_notes: int
     notes_per_second_mean: float
     inter_note_ms_mean: float
@@ -57,114 +58,64 @@ class TabFeatures:
     star_power_ratio: float
     tap_ratio: float
 
-    # Spectral summary from mel
-    mel_rms_mean: float
-    mel_rms_std: float
-    spectral_centroid_mean: float
-
     def to_dict(self) -> Dict:
-        """Convert to dictionary for serialization."""
         return asdict(self)
 
 
-def estimate_tempo_from_mel(
-    mel: np.ndarray,
-    sample_rate: int = 22050,
-    hop_length: int = 256,
-) -> float:
-    """Estimate tempo from mel spectrogram using onset strength envelope."""
+def estimate_tempo_from_mel(mel: np.ndarray, sr: int = 22050, hop: int = 256) -> float:
+    """Estimate tempo (BPM) from mel spectrogram via onset strength."""
     try:
-        import warnings
         import librosa
 
-        # Convert log-mel back to linear scale
         mel_linear = np.exp(mel.astype(np.float32))
+        onset_env = librosa.onset.onset_strength(S=mel_linear, sr=sr, hop_length=hop)
 
-        # Compute onset strength envelope
-        onset_env = librosa.onset.onset_strength(
-            S=mel_linear,
-            sr=sample_rate,
-            hop_length=hop_length,
-        )
-
-        # Estimate tempo (suppress deprecation warning for older librosa)
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning)
             if hasattr(librosa.feature, "rhythm"):
-                tempo = librosa.feature.rhythm.tempo(
-                    onset_envelope=onset_env,
-                    sr=sample_rate,
-                    hop_length=hop_length,
-                )
+                tempo = librosa.feature.rhythm.tempo(onset_envelope=onset_env, sr=sr, hop_length=hop)
             else:
-                tempo = librosa.beat.tempo(
-                    onset_envelope=onset_env,
-                    sr=sample_rate,
-                    hop_length=hop_length,
-                )
-        return float(tempo[0]) if len(tempo) > 0 else 0.0
+                tempo = librosa.beat.tempo(onset_envelope=onset_env, sr=sr, hop_length=hop)
 
+        return float(tempo[0]) if len(tempo) > 0 else 0.0
     except Exception:
         return 0.0
 
 
-def compute_spectral_centroid_from_mel(
-    mel: np.ndarray,
-    n_mels: int = 128,
-) -> float:
-    """Approximate spectral centroid from mel bands."""
-    # Convert log-mel to linear
+def compute_spectral_centroid(mel: np.ndarray, n_mels: int = 128) -> float:
+    """Mean spectral centroid from mel bands."""
     mel_linear = np.exp(mel.astype(np.float32))
-
-    # Frequency bin indices (normalized)
     freq_bins = np.arange(n_mels).reshape(-1, 1)
-
-    # Weighted mean frequency per frame
     total_energy = mel_linear.sum(axis=0) + 1e-10
     centroids = (freq_bins * mel_linear).sum(axis=0) / total_energy
-
     return float(np.mean(centroids))
 
 
 def extract_features(data: TabData, tokenizer: Optional[ChartTokenizer] = None) -> TabFeatures:
-    """Extract time-domain and note-based features from TabData."""
+    """Extract audio and note features from TabData."""
     if tokenizer is None:
         tokenizer = ChartTokenizer()
 
-    mel = data.mel_spectrogram  # (n_mels, n_frames)
+    mel = data.mel_spectrogram
     n_mels, n_frames = mel.shape
     frame_rate = data.sample_rate / data.hop_length
     duration_sec = n_frames / frame_rate
 
-    # Convert log-mel to linear for energy calculations
     mel_linear = np.exp(mel.astype(np.float32))
-
-    # RMS energy per frame (sum across mel bands)
     frame_energy = np.sqrt(np.mean(mel_linear ** 2, axis=0))
     rms_mean = float(np.mean(frame_energy))
     rms_std = float(np.std(frame_energy))
-
-    # Amplitude envelope statistics
     amp_min = float(np.min(frame_energy))
     amp_max = float(np.max(frame_energy))
-    amp_range = amp_max - amp_min
 
-    # Tempo estimation
     tempo = estimate_tempo_from_mel(mel, data.sample_rate, data.hop_length)
+    spectral_centroid = compute_spectral_centroid(mel, n_mels)
 
-    # Spectral centroid
-    spectral_centroid = compute_spectral_centroid_from_mel(mel, n_mels)
-
-    # Decode notes from tokens
-    tokens = data.note_tokens.tolist()
-    notes = tokenizer.decode_tokens(tokens)
+    notes = tokenizer.decode_tokens(data.note_tokens.tolist())
     n_notes = len(notes)
 
-    # Note timing features
     if n_notes > 0:
         notes_per_sec = n_notes / duration_sec if duration_sec > 0 else 0.0
-
-        # Inter-note intervals
         timestamps = [n.timestamp_ms for n in notes]
         if len(timestamps) > 1:
             inter_note = np.diff(timestamps)
@@ -175,41 +126,41 @@ def extract_features(data: TabData, tokenizer: Optional[ChartTokenizer] = None) 
             inter_p75 = float(np.percentile(inter_note, 75))
         else:
             inter_mean = inter_std = inter_median = inter_p25 = inter_p75 = 0.0
-    else:
-        notes_per_sec = 0.0
-        inter_mean = inter_std = inter_median = inter_p25 = inter_p75 = 0.0
 
-    # Note characteristics (will continue in next edit)
-    sustain_ratio = chord_ratio = fret_entropy_val = 0.0
-    hopo_ratio = star_power_ratio = tap_ratio = 0.0
-
-    if n_notes > 0:
-        durations = [n.duration_ms for n in notes]
-        sustain_ratio = sum(1 for d in durations if d > 100) / n_notes
-
+        sustain_ratio = sum(1 for n in notes if n.duration_ms > 100) / n_notes
         chord_ratio = sum(1 for n in notes if len(n.frets) > 1) / n_notes
         hopo_ratio = sum(1 for n in notes if n.is_hopo) / n_notes
         tap_ratio = sum(1 for n in notes if n.is_tap) / n_notes
         star_power_ratio = sum(1 for n in notes if n.is_star_power) / n_notes
 
-        # Fret distribution entropy
         all_frets = [f for n in notes for f in n.frets]
         if all_frets:
             fret_counts = np.bincount(all_frets, minlength=7)
             fret_probs = fret_counts / fret_counts.sum()
             fret_entropy_val = _entropy(fret_probs + 1e-10)
+        else:
+            fret_entropy_val = 0.0
+    else:
+        notes_per_sec = 0.0
+        inter_mean = inter_std = inter_median = inter_p25 = inter_p75 = 0.0
+        sustain_ratio = chord_ratio = hopo_ratio = tap_ratio = star_power_ratio = 0.0
+        fret_entropy_val = 0.0
 
     return TabFeatures(
         content_hash=data.content_hash,
         difficulty_id=data.difficulty_id,
         instrument_id=data.instrument_id,
+        song_id=data.song_id,
         duration_sec=duration_sec,
         rms_energy_mean=rms_mean,
         rms_energy_std=rms_std,
         amplitude_envelope_min=amp_min,
         amplitude_envelope_max=amp_max,
-        amplitude_envelope_range=amp_range,
+        amplitude_envelope_range=amp_max - amp_min,
         tempo_bpm=tempo,
+        mel_rms_mean=rms_mean,
+        mel_rms_std=rms_std,
+        spectral_centroid_mean=spectral_centroid,
         n_notes=n_notes,
         notes_per_second_mean=notes_per_sec,
         inter_note_ms_mean=inter_mean,
@@ -223,43 +174,135 @@ def extract_features(data: TabData, tokenizer: Optional[ChartTokenizer] = None) 
         hopo_ratio=hopo_ratio,
         star_power_ratio=star_power_ratio,
         tap_ratio=tap_ratio,
-        mel_rms_mean=rms_mean,
-        mel_rms_std=rms_std,
-        spectral_centroid_mean=spectral_centroid,
     )
 
 
 def extract_features_from_file(path: Path, tokenizer: Optional[ChartTokenizer] = None) -> TabFeatures:
     """Load .tab file and extract features."""
-    data = load_tab(path)
-    return extract_features(data, tokenizer)
+    return extract_features(load_tab(path), tokenizer)
+
+
+def _extract_single_file(path: Path) -> Optional[tuple[TabFeatures, str]]:
+    """Worker for parallel extraction. Returns (features, filename)."""
+    try:
+        features = extract_features(load_tab(path), ChartTokenizer())
+        return (features, path.name)
+    except Exception as e:
+        print(f"Error processing {path}: {e}")
+        return None
 
 
 def extract_features_batch(
     paths: List[Path],
     tokenizer: Optional[ChartTokenizer] = None,
     progress: bool = True,
+    n_workers: Optional[int] = None,
 ) -> List[TabFeatures]:
     """Extract features from multiple .tab files."""
-    if tokenizer is None:
-        tokenizer = ChartTokenizer()
+    if n_workers is None:
+        tokenizer = tokenizer or ChartTokenizer()
+        results = []
+        iterator = tqdm(paths, desc="Extracting features") if progress else paths
+
+        for path in iterator:
+            try:
+                results.append(extract_features(load_tab(path), tokenizer))
+            except Exception as e:
+                print(f"Error processing {path}: {e}")
+        return results
+
+    if n_workers == 0:
+        n_workers = mp.cpu_count()
 
     results = []
-    iterator = paths
-    if progress:
-        try:
-            from tqdm import tqdm
-            iterator = tqdm(paths, desc="Extracting features")
-        except ImportError:
-            pass
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_extract_single_file, p): i for i, p in enumerate(paths)}
+        iterator = tqdm(as_completed(futures), total=len(paths), desc="Extracting features") if progress else as_completed(futures)
+        for future in iterator:
+            result = future.result()
+            if result is not None:
+                results.append(result[0])  # Just the features, not filename
 
-    for path in iterator:
-        try:
-            features = extract_features_from_file(path, tokenizer)
-            results.append(features)
-        except Exception as e:
-            print(f"Error processing {path}: {e}")
-            continue
+    return results
 
+
+def extract_features_batch_incremental(
+    paths: List[Path],
+    output_path: Path,
+    tokenizer: Optional[ChartTokenizer] = None,
+    progress: bool = True,
+    n_workers: Optional[int] = None,
+    save_interval: int = 100,
+) -> List[TabFeatures]:
+    """Extract features with incremental saving for resume support.
+
+    Writes results to JSONL file incrementally to prevent data loss.
+    Each line includes source_file for resume tracking.
+    """
+    import json
+
+    results: List[TabFeatures] = []
+    pending_writes: List[tuple[TabFeatures, str]] = []
+
+    def flush_to_disk():
+        """Append pending results to JSONL file."""
+        nonlocal pending_writes
+        if not pending_writes:
+            return
+        with open(output_path, "a") as f:
+            for feat, filename in pending_writes:
+                data = feat.to_dict()
+                data["source_file"] = filename
+                f.write(json.dumps(data) + "\n")
+        pending_writes = []
+
+    if n_workers is None:
+        # Sequential mode
+        tokenizer = tokenizer or ChartTokenizer()
+        iterator = tqdm(paths, desc="Extracting features") if progress else paths
+
+        for i, path in enumerate(iterator):
+            try:
+                feat = extract_features(load_tab(path), tokenizer)
+                results.append(feat)
+                pending_writes.append((feat, path.name))
+
+                # Save periodically
+                if (i + 1) % save_interval == 0:
+                    flush_to_disk()
+                    if progress and hasattr(iterator, "set_postfix"):
+                        iterator.set_postfix(saved=len(results))
+            except Exception as e:
+                print(f"Error processing {path}: {e}")
+
+        # Final flush
+        flush_to_disk()
+        return results
+
+    # Parallel mode
+    if n_workers == 0:
+        n_workers = mp.cpu_count()
+
+    processed_count = 0
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_extract_single_file, p): p for p in paths}
+        iterator = tqdm(as_completed(futures), total=len(paths), desc="Extracting features") if progress else as_completed(futures)
+
+        for future in iterator:
+            result = future.result()
+            if result is not None:
+                feat, filename = result
+                results.append(feat)
+                pending_writes.append((feat, filename))
+                processed_count += 1
+
+                # Save periodically
+                if processed_count % save_interval == 0:
+                    flush_to_disk()
+                    if progress and hasattr(iterator, "set_postfix"):
+                        iterator.set_postfix(saved=len(results))
+
+    # Final flush
+    flush_to_disk()
     return results
 
