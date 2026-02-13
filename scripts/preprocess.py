@@ -307,11 +307,11 @@ Examples:
     parser.add_argument("--difficulties", nargs="+",
                         default=["expert", "hard", "medium", "easy"],
                         choices=list(DIFFICULTY_MAP.keys()),
-                        help="Difficulties to extract")
+                        help="Difficulties to extract (default: all)")
     parser.add_argument("--instruments", nargs="+",
-                        default=["lead"],
+                        default=["lead", "bass", "rhythm", "keys"],
                         choices=list(INSTRUMENT_MAP.keys()),
-                        help="Instruments to extract")
+                        help="Instruments to extract (default: all)")
     parser.add_argument("--workers", type=int, default=None,
                         help="Number of parallel workers (default: auto-detect or CPU count)")
     parser.add_argument("--physical-cores", type=int, default=None,
@@ -365,11 +365,19 @@ Examples:
     # Load progress manifest for resume support
     manifest_path = args.output_dir / ".progress_manifest.json"
     processed_manifest: Set[str] = set()
+    song_id_map: dict[str, int] = {}  # song_dir -> song_id mapping
+    next_song_id = 1  # Start at 1 (0 reserved for legacy/unknown)
     if manifest_path.exists():
         try:
             with open(manifest_path, "r") as f:
-                processed_manifest = set(json.load(f))
+                manifest_data = json.load(f)
+                
+                processed_manifest = set(manifest_data.get("processed", []))
+                song_id_map = manifest_data.get("song_id_map", {})
+                next_song_id = manifest_data.get("next_song_id", 1)
             print(f"Loaded progress manifest: {len(processed_manifest)} songs already processed")
+            if song_id_map:
+                print(f"  Song ID mappings: {len(song_id_map)} (next_id={next_song_id})")
         except Exception as e:
             print(f"Warning: Could not load manifest: {e}")
 
@@ -470,15 +478,26 @@ Examples:
     print(f"Stem RMS threshold: {args.min_stem_rms} (stems below this are skipped)")
     print(f"GPU mel extraction: {'enabled' if use_gpu_mel else 'disabled'}")
 
+    # Assign song_ids to pending songs (preserving existing mappings for resume)
+    for song_dir in pending_dirs:
+        song_key = str(song_dir)
+        if song_key not in song_id_map:
+            song_id_map[song_key] = next_song_id
+            next_song_id += 1
+
     # Build task lists for two-phase processing
     # Phase 1: Songs with pre-existing stems (CPU-only, parallel)
     # Phase 2: Songs needing Demucs (GPU, sequential)
-    filters_cpu = filters.copy()
-    filters_cpu["use_gpu_mel"] = False  # CPU workers don't use GPU
+    def make_task(song_dir, use_gpu):
+        """Create a task tuple with song_id in filters."""
+        task_filters = filters.copy()
+        task_filters["use_gpu_mel"] = use_gpu
+        task_filters["song_id"] = song_id_map.get(str(song_dir), 0)
+        return (song_dir, args.output_dir, args.difficulties, args.instruments, task_filters)
 
-    tasks_phase1 = [(song_dir, args.output_dir, args.difficulties, args.instruments, filters_cpu)
+    tasks_phase1 = [make_task(song_dir, use_gpu=False)
                     for song_dir in songs_with_stems if str(song_dir) not in processed_manifest]
-    tasks_phase2 = [(song_dir, args.output_dir, args.difficulties, args.instruments, filters)
+    tasks_phase2 = [make_task(song_dir, use_gpu=True)
                     for song_dir in songs_need_demucs if str(song_dir) not in processed_manifest]
 
     n_variants = len(args.difficulties) * len(args.instruments)
@@ -506,10 +525,15 @@ Examples:
     early_save_threshold = 5  # Save after first 5 songs regardless
 
     def save_manifest():
-        """Save progress manifest to allow resume."""
+        """Save progress manifest to allow resume (v2 format with song_id tracking)."""
         nonlocal last_manifest_save
+        manifest_data = {
+            "processed": list(processed_manifest),
+            "song_id_map": song_id_map,
+            "next_song_id": next_song_id,
+        }
         with open(manifest_path, "w") as f:
-            json.dump(list(processed_manifest), f)
+            json.dump(manifest_data, f)
         last_manifest_save = len(processed_manifest)
 
     def process_batch(batch_tasks, pbar, num_workers):

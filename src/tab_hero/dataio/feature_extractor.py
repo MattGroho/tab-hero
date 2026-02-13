@@ -27,6 +27,7 @@ class TabFeatures:
     content_hash: str
     difficulty_id: int
     instrument_id: int
+    genre_id: int
     song_id: int
 
     # Audio features
@@ -150,6 +151,7 @@ def extract_features(data: TabData, tokenizer: Optional[ChartTokenizer] = None) 
         content_hash=data.content_hash,
         difficulty_id=data.difficulty_id,
         instrument_id=data.instrument_id,
+        genre_id=data.genre_id,
         song_id=data.song_id,
         duration_sec=duration_sec,
         rms_energy_mean=rms_mean,
