@@ -50,6 +50,7 @@ class TabFeatures:
     inter_note_ms_median: float
     inter_note_ms_p25: float
     inter_note_ms_p75: float
+    inter_note_ms_iqr: float
 
     # Note characteristics
     sustain_ratio: float
@@ -64,31 +65,51 @@ class TabFeatures:
 
 
 def estimate_tempo_from_mel(mel: np.ndarray, sr: int = 22050, hop: int = 256) -> float:
-    """Estimate tempo (BPM) from mel spectrogram via onset strength."""
+    """Estimate tempo (BPM) from mel spectrogram via onset strength.
+
+    The stored mel is z-normalized log-mel, so we cannot simply exp() it to
+    recover linear power.  Instead, shift the log-mel to be non-negative
+    (min-subtract) before computing onset strength, which only needs relative
+    frame-to-frame energy changes.
+    """
     try:
         import librosa
 
-        mel_linear = np.exp(mel.astype(np.float32))
-        onset_env = librosa.onset.onset_strength(S=mel_linear, sr=sr, hop_length=hop)
+        mel_f32 = mel.astype(np.float32)
+        # Shift so minimum is 0 -- onset_strength only needs relative changes
+        mel_shifted = mel_f32 - mel_f32.min()
+        onset_env = librosa.onset.onset_strength(
+            S=mel_shifted, sr=sr, hop_length=hop
+        )
 
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning)
             if hasattr(librosa.feature, "rhythm"):
-                tempo = librosa.feature.rhythm.tempo(onset_envelope=onset_env, sr=sr, hop_length=hop)
+                tempo = librosa.feature.rhythm.tempo(
+                    onset_envelope=onset_env, sr=sr, hop_length=hop
+                )
             else:
-                tempo = librosa.beat.tempo(onset_envelope=onset_env, sr=sr, hop_length=hop)
+                tempo = librosa.beat.tempo(
+                    onset_envelope=onset_env, sr=sr, hop_length=hop
+                )
 
         return float(tempo[0]) if len(tempo) > 0 else 0.0
-    except Exception:
+    except Exception as exc:
+        warnings.warn(f"Tempo estimation failed: {exc}")
         return 0.0
 
 
 def compute_spectral_centroid(mel: np.ndarray, n_mels: int = 128) -> float:
-    """Mean spectral centroid from mel bands."""
-    mel_linear = np.exp(mel.astype(np.float32))
+    """Mean spectral centroid from mel bands.
+
+    Uses min-shifted log-mel (non-negative) as weights so that the centroid
+    reflects relative band energy even when mel is z-normalized.
+    """
+    mel_f32 = mel.astype(np.float32)
+    mel_shifted = mel_f32 - mel_f32.min()  # shift to non-negative
     freq_bins = np.arange(n_mels).reshape(-1, 1)
-    total_energy = mel_linear.sum(axis=0) + 1e-10
-    centroids = (freq_bins * mel_linear).sum(axis=0) / total_energy
+    total_energy = mel_shifted.sum(axis=0) + 1e-10
+    centroids = (freq_bins * mel_shifted).sum(axis=0) / total_energy
     return float(np.mean(centroids))
 
 
@@ -102,12 +123,19 @@ def extract_features(data: TabData, tokenizer: Optional[ChartTokenizer] = None) 
     frame_rate = data.sample_rate / data.hop_length
     duration_sec = n_frames / frame_rate
 
-    mel_linear = np.exp(mel.astype(np.float32))
-    frame_energy = np.sqrt(np.mean(mel_linear ** 2, axis=0))
+    # RMS from min-shifted log-mel (approximate linear-domain energy)
+    mel_f32 = mel.astype(np.float32)
+    mel_shifted = mel_f32 - mel_f32.min()
+    frame_energy = np.sqrt(np.mean(mel_shifted ** 2, axis=0))
     rms_mean = float(np.mean(frame_energy))
     rms_std = float(np.std(frame_energy))
     amp_min = float(np.min(frame_energy))
     amp_max = float(np.max(frame_energy))
+
+    # Log-mel domain RMS (distinct from the shifted-linear RMS above)
+    log_mel_frame_energy = np.sqrt(np.mean(mel_f32 ** 2, axis=0))
+    mel_rms_mean = float(np.mean(log_mel_frame_energy))
+    mel_rms_std = float(np.std(log_mel_frame_energy))
 
     tempo = estimate_tempo_from_mel(mel, data.sample_rate, data.hop_length)
     spectral_centroid = compute_spectral_centroid(mel, n_mels)
@@ -127,6 +155,7 @@ def extract_features(data: TabData, tokenizer: Optional[ChartTokenizer] = None) 
             inter_p75 = float(np.percentile(inter_note, 75))
         else:
             inter_mean = inter_std = inter_median = inter_p25 = inter_p75 = 0.0
+        inter_iqr = inter_p75 - inter_p25
 
         sustain_ratio = sum(1 for n in notes if n.duration_ms > 100) / n_notes
         chord_ratio = sum(1 for n in notes if len(n.frets) > 1) / n_notes
@@ -160,8 +189,8 @@ def extract_features(data: TabData, tokenizer: Optional[ChartTokenizer] = None) 
         amplitude_envelope_max=amp_max,
         amplitude_envelope_range=amp_max - amp_min,
         tempo_bpm=tempo,
-        mel_rms_mean=rms_mean,
-        mel_rms_std=rms_std,
+        mel_rms_mean=mel_rms_mean,
+        mel_rms_std=mel_rms_std,
         spectral_centroid_mean=spectral_centroid,
         n_notes=n_notes,
         notes_per_second_mean=notes_per_sec,
@@ -170,6 +199,7 @@ def extract_features(data: TabData, tokenizer: Optional[ChartTokenizer] = None) 
         inter_note_ms_median=inter_median,
         inter_note_ms_p25=inter_p25,
         inter_note_ms_p75=inter_p75,
+        inter_note_ms_iqr=inter_iqr,
         sustain_ratio=sustain_ratio,
         chord_ratio=chord_ratio,
         fret_entropy=fret_entropy_val,

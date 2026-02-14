@@ -120,7 +120,7 @@ class ChartTokenizer:
         self._dur_token_end = token_id
 
         self.vocab_size = token_id
-    
+
     @property
     def pad_token_id(self) -> int:
         return self.PAD_TOKEN
