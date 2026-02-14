@@ -10,7 +10,7 @@ import torchaudio
 
 from tab_hero.dataio.chart_parser import ChartParser
 from tab_hero.dataio.tokenizer import ChartTokenizer
-from tab_hero.dataio.tab_format import TabData, save_tab, compute_content_hash
+from tab_hero.dataio.tab_format import TabData, save_tab, compute_content_hash, GENRE_MAP
 from tab_hero.dataio.source_separation import (
     check_demucs_available,
     compute_stem_rms,
@@ -23,12 +23,170 @@ from tab_hero.dataio.source_separation import (
 DIFFICULTY_MAP: Dict[str, int] = {"easy": 0, "medium": 1, "hard": 2, "expert": 3}
 INSTRUMENT_MAP: Dict[str, int] = {"lead": 0, "bass": 1, "rhythm": 2, "keys": 3}
 
+# Mapping from song.ini genre strings to GENRE_MAP IDs
+# Handles variations like "Classic Rock" -> "rock", "Nu Metal" -> "metal"
+GENRE_STRING_MAP: Dict[str, int] = {
+    # Rock variants
+    "rock": GENRE_MAP["rock"],
+    "classic rock": GENRE_MAP["rock"],
+    "hard rock": GENRE_MAP["rock"],
+    "southern rock": GENRE_MAP["rock"],
+    "pop-rock": GENRE_MAP["rock"],
+    "pop rock": GENRE_MAP["rock"],
+    "pop/rock": GENRE_MAP["rock"],
+    "glam": GENRE_MAP["rock"],
+    "glam rock": GENRE_MAP["rock"],
+    "prog": GENRE_MAP["rock"],
+    "prog rock": GENRE_MAP["rock"],
+    "progressive": GENRE_MAP["rock"],
+    "progressive rock": GENRE_MAP["rock"],
+    "grunge": GENRE_MAP["rock"],
+    "new wave": GENRE_MAP["rock"],
+    # Metal variants
+    "metal": GENRE_MAP["metal"],
+    "heavy metal": GENRE_MAP["metal"],
+    "thrash metal": GENRE_MAP["metal"],
+    "nu metal": GENRE_MAP["metal"],
+    "nu-metal": GENRE_MAP["metal"],
+    "power metal": GENRE_MAP["metal"],
+    "metalcore": GENRE_MAP["metal"],
+    "death metal": GENRE_MAP["metal"],
+    "black metal": GENRE_MAP["metal"],
+    "doom metal": GENRE_MAP["metal"],
+    "speed metal": GENRE_MAP["metal"],
+    "alternative metal": GENRE_MAP["metal"],
+    # Alternative
+    "alternative": GENRE_MAP["alternative"],
+    "alternative rock": GENRE_MAP["alternative"],
+    "alt rock": GENRE_MAP["alternative"],
+    "emo": GENRE_MAP["alternative"],
+    # Punk
+    "punk": GENRE_MAP["punk"],
+    "punk rock": GENRE_MAP["punk"],
+    "pop punk": GENRE_MAP["punk"],
+    "hardcore": GENRE_MAP["punk"],
+    "hardcore punk": GENRE_MAP["punk"],
+    # Pop
+    "pop": GENRE_MAP["pop"],
+    "dance": GENRE_MAP["pop"],
+    "pop/dance/electronic": GENRE_MAP["pop"],
+    "disco": GENRE_MAP["pop"],
+    # Electronic
+    "electronic": GENRE_MAP["electronic"],
+    "edm": GENRE_MAP["electronic"],
+    "synth": GENRE_MAP["electronic"],
+    "synthwave": GENRE_MAP["electronic"],
+    "industrial": GENRE_MAP["electronic"],
+    # Indie
+    "indie": GENRE_MAP["indie"],
+    "indie rock": GENRE_MAP["indie"],
+    "indie pop": GENRE_MAP["indie"],
+    # Country
+    "country": GENRE_MAP["country"],
+    "country rock": GENRE_MAP["country"],
+    # Blues
+    "blues": GENRE_MAP["blues"],
+    "blues rock": GENRE_MAP["blues"],
+    # Jazz
+    "jazz": GENRE_MAP["jazz"],
+    "jazz fusion": GENRE_MAP["jazz"],
+    "fusion": GENRE_MAP["jazz"],
+    # Classical
+    "classical": GENRE_MAP["classical"],
+    "orchestral": GENRE_MAP["classical"],
+    # Hip-hop
+    "hip-hop": GENRE_MAP["hiphop"],
+    "hip hop": GENRE_MAP["hiphop"],
+    "hiphop": GENRE_MAP["hiphop"],
+    "rap": GENRE_MAP["hiphop"],
+    "r&b": GENRE_MAP["hiphop"],
+    "r&b/soul/funk": GENRE_MAP["hiphop"],
+    "hip-hop/rap": GENRE_MAP["hiphop"],
+    "urban": GENRE_MAP["hiphop"],
+    # Reggae
+    "reggae": GENRE_MAP["reggae"],
+    "ska": GENRE_MAP["reggae"],
+    "ska punk": GENRE_MAP["reggae"],
+    "reggae/ska": GENRE_MAP["reggae"],
+    # Folk
+    "folk": GENRE_MAP["folk"],
+    "folk rock": GENRE_MAP["folk"],
+    "acoustic": GENRE_MAP["folk"],
+    # Additional metal subgenres
+    "progressive metal": GENRE_MAP["metal"],
+    "melodic death metal": GENRE_MAP["metal"],
+    "glam metal": GENRE_MAP["metal"],
+    "groove metal": GENRE_MAP["metal"],
+    # Additional rock subgenres
+    "psychedelic rock": GENRE_MAP["rock"],
+    "instrumental rock": GENRE_MAP["rock"],
+    "post-grunge": GENRE_MAP["rock"],
+    # Additional alternative/punk
+    "power pop": GENRE_MAP["alternative"],
+    "post-hardcore": GENRE_MAP["punk"],
+    # Other
+    "other": GENRE_MAP["other"],
+    "novelty": GENRE_MAP["other"],
+    "soundtrack": GENRE_MAP["other"],
+    "video game": GENRE_MAP["other"],
+    "virtuoso": GENRE_MAP["other"],
+    "comedy": GENRE_MAP["other"],
+}
+
 MEL_CONFIG: Dict[str, int] = {
     "sample_rate": 22050,
     "n_fft": 2048,
     "hop_length": 256,  # ~11.6ms per frame
     "n_mels": 128,
 }
+
+
+def parse_song_ini(song_dir: Path) -> Dict[str, str]:
+    """
+    Parse song.ini and return metadata as a dict.
+
+    Args:
+        song_dir: Directory containing song.ini
+
+    Returns:
+        Dict with keys like 'genre', 'artist', 'name', etc.
+        Empty dict if song.ini not found or parsing fails.
+    """
+    ini_path = song_dir / "song.ini"
+    if not ini_path.exists():
+        return {}
+
+    metadata: Dict[str, str] = {}
+    try:
+        with open(ini_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    key, _, value = line.partition("=")
+                    metadata[key.strip().lower()] = value.strip()
+    except Exception:
+        return {}
+
+    return metadata
+
+
+def map_genre_to_id(genre_str: Optional[str]) -> int:
+    """
+    Map a genre string from song.ini to a GENRE_MAP ID.
+
+    Args:
+        genre_str: Genre string from song.ini (e.g., "Classic Rock", "Nu Metal")
+
+    Returns:
+        Genre ID from GENRE_MAP. Returns 0 (unknown) if genre_str is None/empty,
+        or GENRE_MAP["other"] if the genre is not in GENRE_STRING_MAP.
+    """
+    if not genre_str:
+        return GENRE_MAP["unknown"]
+
+    genre_lower = genre_str.lower().strip()
+    return GENRE_STRING_MAP.get(genre_lower, GENRE_MAP["other"])
+
 
 # Cached transforms (lazy-initialized, separate CPU/GPU caches)
 _mel_transform_cpu: Optional[torchaudio.transforms.MelSpectrogram] = None
@@ -235,9 +393,11 @@ def process_song_all_variants(args: Tuple) -> Dict[str, Any]:
     Args:
         args: (song_dir, output_dir, difficulties, instruments, filters)
               filters dict may contain: min_notes, min_duration, max_duration,
-              use_separation, stem_cache_dir, parser, tokenizer, use_gpu_mel
+              use_separation, stem_cache_dir, parser, tokenizer, use_gpu_mel,
+              song_id (sequential index for grouping variants)
     """
     song_dir, output_dir, difficulties, instruments, filters = args
+    song_id = filters.get("song_id", 0)
 
     audio_path = find_audio_file(song_dir)
     chart_path = find_chart_file(song_dir)
@@ -255,6 +415,10 @@ def process_song_all_variants(args: Tuple) -> Dict[str, Any]:
     # Reuse parser/tokenizer from filters if provided, otherwise create new
     parser = filters.get("parser") or ChartParser()
     tokenizer = filters.get("tokenizer") or ChartTokenizer()
+
+    # Extract genre from song.ini
+    song_metadata = parse_song_ini(song_dir)
+    genre_id = map_genre_to_id(song_metadata.get("genre"))
 
     # Determine which stems we need based on requested instruments
     needed_stems: Set[str] = set()
@@ -423,6 +587,8 @@ def process_song_all_variants(args: Tuple) -> Dict[str, Any]:
                     difficulty_id=DIFFICULTY_MAP[difficulty],
                     instrument_id=INSTRUMENT_MAP[instrument],
                     content_hash=variant_hash,
+                    genre_id=genre_id,
+                    song_id=song_id,
                 )
 
                 out_path = output_dir / f"{variant_hash}.tab"
