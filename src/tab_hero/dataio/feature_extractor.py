@@ -5,7 +5,7 @@ import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 from tqdm import tqdm
@@ -261,7 +261,8 @@ def extract_features_batch_incremental(
     if n_workers is None:
         # Sequential mode
         tokenizer = tokenizer or ChartTokenizer()
-        iterator = tqdm(paths, desc="Extracting features") if progress else paths
+        pbar: Optional[tqdm] = tqdm(paths, desc="Extracting features") if progress else None
+        iterator: Iterable[Path] = pbar if pbar is not None else paths
 
         for i, path in enumerate(iterator):
             try:
@@ -272,8 +273,8 @@ def extract_features_batch_incremental(
                 # Save periodically
                 if (i + 1) % save_interval == 0:
                     flush_to_disk()
-                    if progress and hasattr(iterator, "set_postfix"):
-                        iterator.set_postfix(saved=len(results))
+                    if pbar is not None:
+                        pbar.set_postfix(saved=len(results))
             except Exception as e:
                 print(f"Error processing {path}: {e}")
 
@@ -288,9 +289,10 @@ def extract_features_batch_incremental(
     processed_count = 0
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(_extract_single_file, p): p for p in paths}
-        iterator = tqdm(as_completed(futures), total=len(paths), desc="Extracting features") if progress else as_completed(futures)
+        pbar_parallel: Optional[tqdm] = tqdm(as_completed(futures), total=len(paths), desc="Extracting features") if progress else None
+        parallel_iter = pbar_parallel if pbar_parallel is not None else as_completed(futures)
 
-        for future in iterator:
+        for future in parallel_iter:
             result = future.result()
             if result is not None:
                 feat, filename = result
@@ -301,8 +303,8 @@ def extract_features_batch_incremental(
                 # Save periodically
                 if processed_count % save_interval == 0:
                     flush_to_disk()
-                    if progress and hasattr(iterator, "set_postfix"):
-                        iterator.set_postfix(saved=len(results))
+                    if pbar_parallel is not None:
+                        pbar_parallel.set_postfix(saved=len(results))
 
     # Final flush
     flush_to_disk()
