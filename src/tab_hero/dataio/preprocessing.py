@@ -332,7 +332,7 @@ def load_audio(audio_path: Path) -> Tuple[torch.Tensor, int]:
         waveform, sr = librosa.load(str(audio_path), sr=None, mono=False)
         if waveform.ndim == 1:
             waveform = waveform[np.newaxis, :]
-        return torch.from_numpy(waveform.astype(np.float32)), sr
+        return torch.from_numpy(waveform.astype(np.float32)), int(sr)
     except ImportError:
         pass
 

@@ -32,7 +32,7 @@ from .source_separation import (
     separate_audio_stems,
 )
 from .tab_dataset import TabDataset
-from .tab_format import TabData, load_tab, save_tab
+from .tab_format import GENRE_MAP, TabData, load_tab, save_tab
 from .tokenizer import ChartTokenizer
 from .feature_extractor import (
     TabFeatures,
@@ -46,6 +46,7 @@ __all__ = [
     "ChartParser",
     "ChartTokenizer",
     "DIFFICULTY_MAP",
+    "GENRE_MAP",
     "INSTRUMENT_MAP",
     "INSTRUMENT_TO_STEM",
     "MEL_CONFIG",
