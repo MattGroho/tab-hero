@@ -18,7 +18,7 @@ but .tab -> source is not.
 Binary Layout:
     4 bytes:  magic (TABH)
     2 bytes:  version (uint16)
-    2 bytes:  difficulty_id + instrument_id (uint8 each)
+    4 bytes:  difficulty_id + instrument_id + genre_id + reserved (uint8 each)
     4 bytes:  sample_rate (uint32)
     4 bytes:  hop_length (uint32)
     4 bytes:  n_mels (uint32)
@@ -49,6 +49,26 @@ TAB_MAGIC = b"TABH"
 # zlib compression level (6 is default, good balance)
 ZLIB_COMPRESSION_LEVEL = 6
 
+# Genre mapping for conditioning
+GENRE_MAP = {
+    "unknown": 0,
+    "rock": 1,
+    "metal": 2,
+    "alternative": 3,
+    "punk": 4,
+    "pop": 5,
+    "electronic": 6,
+    "indie": 7,
+    "country": 8,
+    "blues": 9,
+    "jazz": 10,
+    "classical": 11,
+    "hiphop": 12,
+    "reggae": 13,
+    "folk": 14,
+    "other": 15,
+}
+
 
 @dataclass
 class TabData:
@@ -78,6 +98,9 @@ class TabData:
     # Content hash for deduplication only
     content_hash: str
 
+    # Fields with defaults must come after fields without defaults
+    genre_id: int = 0  # 0=unknown, see GENRE_MAP for full mapping
+
     # Song identifier - groups all variants (difficulty/instrument) of the same song
     # This is a sequential index assigned during preprocessing, not reversible to source
     song_id: int = 0
@@ -106,7 +129,8 @@ def save_tab(data: TabData, path: Path) -> None:
     with open(path, "wb") as f:
         f.write(TAB_MAGIC)
         f.write(struct.pack("<H", TAB_FORMAT_VERSION))
-        f.write(struct.pack("<BB", data.difficulty_id, data.instrument_id))
+        # Pack difficulty, instrument, genre, and reserved byte (4 bytes total)
+        f.write(struct.pack("<BBBB", data.difficulty_id, data.instrument_id, data.genre_id, 0))
         f.write(struct.pack("<I", data.sample_rate))
         f.write(struct.pack("<I", data.hop_length))
         f.write(struct.pack("<I", n_mels))
@@ -135,7 +159,8 @@ def load_tab(path: Path) -> TabData:
         if version > TAB_FORMAT_VERSION:
             raise ValueError(f"Unsupported .tab version {version}")
 
-        difficulty_id, instrument_id = struct.unpack("<BB", f.read(2))
+        # Read difficulty, instrument, genre, and reserved byte (4 bytes total)
+        difficulty_id, instrument_id, genre_id, _ = struct.unpack("<BBBB", f.read(4))
         sample_rate = struct.unpack("<I", f.read(4))[0]
         hop_length = struct.unpack("<I", f.read(4))[0]
         n_mels = struct.unpack("<I", f.read(4))[0]
@@ -160,6 +185,7 @@ def load_tab(path: Path) -> TabData:
         note_tokens=tokens,
         difficulty_id=difficulty_id,
         instrument_id=instrument_id,
+        genre_id=genre_id,
         content_hash=content_hash,
         song_id=song_id,
     )
