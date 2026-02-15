@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 
-from .tab_format import load_tab, TabData
+from .tab_format import load_tab
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,7 @@ class TabDataset(Dataset):
                 "note_tokens": torch.from_numpy(tokens).long(),
                 "difficulty_id": torch.tensor(data.difficulty_id),
                 "instrument_id": torch.tensor(data.instrument_id),
+                "genre_id": torch.tensor(data.genre_id),
             }
 
         except Exception as e:
@@ -102,6 +103,7 @@ class TabDataset(Dataset):
                 "note_tokens": torch.tensor([1, 2], dtype=torch.long),  # BOS, EOS
                 "difficulty_id": torch.tensor(3),  # expert
                 "instrument_id": torch.tensor(0),  # lead
+                "genre_id": torch.tensor(0),  # unknown
             }
 
 
@@ -111,6 +113,7 @@ def tab_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tens
     note_tokens = [item["note_tokens"] for item in batch]
     difficulty_ids = torch.stack([item["difficulty_id"] for item in batch])
     instrument_ids = torch.stack([item["instrument_id"] for item in batch])
+    genre_ids = torch.stack([item["genre_id"] for item in batch])
 
     audio_padded = pad_sequence(audio_emb, batch_first=True, padding_value=0.0)
     tokens_padded = pad_sequence(note_tokens, batch_first=True, padding_value=0)
@@ -120,5 +123,6 @@ def tab_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tens
         "note_tokens": tokens_padded,
         "difficulty_id": difficulty_ids,
         "instrument_id": instrument_ids,
+        "genre_id": genre_ids,
     }
 
