@@ -5,7 +5,7 @@ Handles loading and preprocessing of audio-chart pairs for training.
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional
 import logging
 
 import torch
@@ -13,8 +13,8 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
 from .audio_processor import AudioProcessor
-from .chart_parser import ChartParser, ChartData
-from .tokenizer import ChartTokenizer, TokenizerConfig
+from .chart_parser import ChartParser
+from .tokenizer import ChartTokenizer
 
 logger = logging.getLogger(__name__)
 
