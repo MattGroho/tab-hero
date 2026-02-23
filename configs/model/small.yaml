@@ -1,0 +1,25 @@
+# @package _global_
+# Small model configuration for testing and development
+# ~30M parameters
+#
+# Use case: Quick experiments, debugging, limited hardware
+# Training: ~2-4 hours on single GPU
+
+model:
+  audio_input_dim: 128            # Mel spectrogram bins (n_mels)
+  encoder_dim: 384
+  decoder_dim: 384
+  n_decoder_layers: 4
+  n_heads: 6
+  ffn_dim: 1536
+  max_seq_len: 8192
+  dropout: 0.1
+  audio_downsample: 4
+  use_flash: true
+  use_rope: true
+  gradient_checkpointing: false   # Not needed for small model
+
+# Adjusted training for smaller model
+training:
+  batch_size: 16
+  gradient_accumulation_steps: 2  # Effective batch = 32
