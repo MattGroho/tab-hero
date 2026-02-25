@@ -76,3 +76,5 @@ logs/
 # Environment
 .env
 .env.local
+
+.docs
