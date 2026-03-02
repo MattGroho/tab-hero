@@ -1,0 +1,32 @@
+# @package _global_
+# Base model configuration (default)
+# ~75M parameters
+#
+# Use case: Standard training, good balance of quality and speed
+# Training: ~12-24 hours on single 32GB GPU
+# This is the recommended starting point
+
+model:
+  audio_input_dim: 128
+  encoder_dim: 512
+  decoder_dim: 512
+  n_decoder_layers: 6
+  n_heads: 8
+  ffn_dim: 2048
+  max_seq_len: 8192
+  dropout: 0.1
+  audio_downsample: 4
+  use_flash: true
+  use_rope: true
+  gradient_checkpointing: true
+
+# Training settings for base model
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 4  # Effective batch = 32
+  learning_rate: 1.0e-4
+
+data:
+  max_mel_frames: 8192
+  max_sequence_length: 4096
+

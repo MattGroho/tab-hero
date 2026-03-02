@@ -148,6 +148,41 @@ def save_tab(data: TabData, path: Path) -> None:
         f.write(tokens_i16.tobytes())
 
 
+def peek_tab_header(path: Path) -> dict:
+    """Read .tab file header without decompressing mel data.
+
+    Returns dict with: difficulty_id, instrument_id, genre_id, sample_rate,
+    hop_length, n_mels, n_frames, n_tokens, content_hash, song_id.
+    """
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        if magic != TAB_MAGIC:
+            raise ValueError(f"Invalid .tab file: bad magic {magic}")
+        version = struct.unpack("<H", f.read(2))[0]
+        if version > TAB_FORMAT_VERSION:
+            raise ValueError(f"Unsupported .tab version {version}")
+        difficulty_id, instrument_id, genre_id, _ = struct.unpack("<BBBB", f.read(4))
+        sample_rate = struct.unpack("<I", f.read(4))[0]
+        hop_length = struct.unpack("<I", f.read(4))[0]
+        n_mels = struct.unpack("<I", f.read(4))[0]
+        n_frames = struct.unpack("<I", f.read(4))[0]
+        n_tokens = struct.unpack("<I", f.read(4))[0]
+        content_hash = f.read(16).rstrip(b"\x00").decode("ascii")
+        song_id = struct.unpack("<I", f.read(4))[0]
+    return {
+        "difficulty_id": difficulty_id,
+        "instrument_id": instrument_id,
+        "genre_id": genre_id,
+        "sample_rate": sample_rate,
+        "hop_length": hop_length,
+        "n_mels": n_mels,
+        "n_frames": n_frames,
+        "n_tokens": n_tokens,
+        "content_hash": content_hash,
+        "song_id": song_id,
+    }
+
+
 def load_tab(path: Path) -> TabData:
     """Load a .tab file."""
     with open(path, "rb") as f:

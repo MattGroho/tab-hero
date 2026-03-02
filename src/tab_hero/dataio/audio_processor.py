@@ -81,11 +81,19 @@ class AudioProcessor:
         return waveform, self.sample_rate
 
     def encode(self, waveform: torch.Tensor) -> torch.Tensor:
-        """Encode waveform (1, samples) to mel spectrogram (n_frames, n_mels)."""
+        """Encode waveform (1, samples) to mel spectrogram (n_frames, n_mels).
+
+        Applies log-mel transform followed by per-file z-normalization to match
+        the preprocessing pipeline (see preprocessing.waveform_to_mel).
+        """
         waveform = waveform.to(self.device)
         with torch.no_grad():
             mel = self.mel_transform(waveform)
             mel = torch.log(mel.clamp(min=1e-5))
+            # Z-normalize to match preprocessing (preprocessing.py:372-375)
+            mel_std = mel.std()
+            if mel_std > 1e-6:
+                mel = (mel - mel.mean()) / mel_std
             mel = mel.squeeze(0).transpose(0, 1)
         return mel
 
@@ -117,3 +125,47 @@ class AudioProcessor:
         mel = self.encode(waveform)
         return mel, self.get_frame_timestamps(mel.shape[0])
 
+
+def spec_augment(
+    mel: torch.Tensor,
+    freq_mask_param: int = 27,
+    time_mask_param: int = 100,
+    n_freq_masks: int = 2,
+    n_time_masks: int = 2,
+) -> torch.Tensor:
+    """Apply SpecAugment to a mel spectrogram tensor.
+
+    Applies frequency and time masking as described in
+    Park et al., "SpecAugment: A Simple Data Augmentation Method
+    for Automatic Speech Recognition", 2019.
+
+    Args:
+        mel: (n_frames, n_mels) mel spectrogram tensor.
+        freq_mask_param: Maximum width of each frequency mask.
+        time_mask_param: Maximum width of each time mask.
+        n_freq_masks: Number of frequency masks to apply.
+        n_time_masks: Number of time masks to apply.
+
+    Returns:
+        Augmented mel tensor (same shape, in-place on a clone).
+    """
+    mel = mel.clone()
+    n_frames, n_mels = mel.shape
+
+    # Frequency masking
+    for _ in range(n_freq_masks):
+        f = torch.randint(0, min(freq_mask_param, n_mels) + 1, (1,)).item()
+        if f == 0:
+            continue
+        f0 = torch.randint(0, max(n_mels - f, 1), (1,)).item()
+        mel[:, f0 : f0 + f] = 0.0
+
+    # Time masking
+    for _ in range(n_time_masks):
+        t = torch.randint(0, min(time_mask_param, n_frames) + 1, (1,)).item()
+        if t == 0:
+            continue
+        t0 = torch.randint(0, max(n_frames - t, 1), (1,)).item()
+        mel[t0 : t0 + t, :] = 0.0
+
+    return mel

@@ -1,0 +1,36 @@
+# @package _global_
+# Large model configuration for production training
+# ~150M parameters
+#
+# Use case: Final production model, best quality
+# Training: ~24-48 hours on single 32GB GPU
+# Requires: 32GB VRAM (RTX 5090, A100)
+
+model:
+  audio_input_dim: 128            # Mel spectrogram bins (n_mels)
+  encoder_dim: 768
+  decoder_dim: 768
+  n_decoder_layers: 8
+  n_heads: 12
+  ffn_dim: 3072
+  max_seq_len: 16384              # Extended for very long songs
+  dropout: 0.1
+  audio_downsample: 4
+  use_flash: true
+  use_rope: true
+  gradient_checkpointing: true    # Required for memory
+
+# Adjusted training for large model
+training:
+  batch_size: 8                   # Increased from 4 for better VRAM utilization
+  gradient_accumulation_steps: 4  # Effective batch = 32
+  learning_rate: 5.0e-5           # Lower LR for larger model
+
+data:
+  max_mel_frames: 16384           # Match model max_seq_len
+  max_sequence_length: 8192
+  chunk_overlap_frames: 1024      # Larger overlap for longer chunks
+  persistent_workers: true        # Keep workers alive between epochs
+
+hardware:
+  compile: true                   # torch.compile for kernel fusion speedup

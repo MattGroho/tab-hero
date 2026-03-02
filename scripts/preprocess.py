@@ -371,7 +371,7 @@ Examples:
         try:
             with open(manifest_path, "r") as f:
                 manifest_data = json.load(f)
-                
+
                 processed_manifest = set(manifest_data.get("processed", []))
                 song_id_map = manifest_data.get("song_id_map", {})
                 next_song_id = manifest_data.get("next_song_id", 1)
@@ -673,17 +673,39 @@ Examples:
             cleanup_source_directory(Path(song_dir_str))
         print("Cleanup complete")
 
-    # Collect all .tab files and create train/val split
+    # Collect all .tab files and create train/val split grouped by song_id
+    # to prevent data leakage (same song in both train and val).
     import random
+    from collections import defaultdict
+    from tab_hero.dataio.tab_format import peek_tab_header
+
     all_tab_files = sorted([f.stem for f in args.output_dir.glob("*.tab")])
+
+    # Group files by song_id
+    song_to_files: dict[int, list[str]] = defaultdict(list)
+    for stem in all_tab_files:
+        try:
+            header = peek_tab_header(args.output_dir / f"{stem}.tab")
+            song_to_files[header["song_id"]].append(stem)
+        except Exception as e:
+            print(f"  Warning: could not read header for {stem}.tab: {e}")
+            song_to_files[-1].append(stem)  # fallback group
+
+    song_ids = sorted(song_to_files.keys())
     random.seed(42)  # Reproducible split
-    random.shuffle(all_tab_files)
+    random.shuffle(song_ids)
 
-    n_val = int(len(all_tab_files) * args.val_split)
-    val_files = set(all_tab_files[:n_val])
-    train_files = set(all_tab_files[n_val:])
+    n_val_songs = max(1, int(len(song_ids) * args.val_split))
+    val_song_ids = set(song_ids[:n_val_songs])
 
-    print(f"\nTrain/val split: {len(train_files)} train, {len(val_files)} val "
+    val_files: set[str] = set()
+    train_files: set[str] = set()
+    for sid in song_ids:
+        target = val_files if sid in val_song_ids else train_files
+        target.update(song_to_files[sid])
+
+    print(f"\nTrain/val split (by song): {len(train_files)} train files, "
+          f"{len(val_files)} val files from {n_val_songs}/{len(song_ids)} songs "
           f"({args.val_split * 100:.1f}% val)")
 
     # Write processing manifest with full config for reproducibility

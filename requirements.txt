@@ -29,7 +29,6 @@ typer>=0.9.0
 rich>=13.0.0
 
 # Experiment Tracking and Logging
-wandb>=0.16.0
 tensorboard>=2.15.0
 
 # Visualization
