@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tab-hero"
-version = "0.1.0"
+version = "1.0.0"
 description = "Automatic guitar chart generation from audio using transformers"
 readme = "README.md"
 license = {text = "MIT"}

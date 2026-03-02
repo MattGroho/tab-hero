@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 
+from .audio_processor import spec_augment
 from .tab_format import load_tab
 
 logger = logging.getLogger(__name__)
@@ -34,10 +35,12 @@ class TabDataset(Dataset):
         split: Optional[str] = None,
         max_mel_frames: int = 4096,
         max_token_length: int = 4096,
+        training: bool = False,
     ):
         self.data_dir = Path(data_dir)
         self.max_mel_frames = max_mel_frames
         self.max_token_length = max_token_length
+        self.training = training
 
         # Load manifest if available for train/val split
         manifest_path = self.data_dir / "manifest.json"
@@ -86,43 +89,51 @@ class TabDataset(Dataset):
                 # Append EOS (token 2)
                 tokens = list(tokens) + [2]
 
+            audio = torch.from_numpy(mel).T  # (n_frames, n_mels)
+            if self.training:
+                audio = spec_augment(audio)
+
             return {
                 # Use audio_embeddings key for trainer compatibility
-                "audio_embeddings": torch.from_numpy(mel).T,  # (n_frames, n_mels)
+                "audio_embeddings": audio,
                 "note_tokens": torch.from_numpy(tokens).long(),
                 "difficulty_id": torch.tensor(data.difficulty_id),
                 "instrument_id": torch.tensor(data.instrument_id),
-                "genre_id": torch.tensor(data.genre_id),
             }
 
         except Exception as e:
             logger.warning(f"Failed to load {tab_path}: {e}")
-            # Return minimal valid sample
-            return {
-                "audio_embeddings": torch.zeros(1, 128),
-                "note_tokens": torch.tensor([1, 2], dtype=torch.long),  # BOS, EOS
-                "difficulty_id": torch.tensor(3),  # expert
-                "instrument_id": torch.tensor(0),  # lead
-                "genre_id": torch.tensor(0),  # unknown
-            }
+            return None
 
 
 def tab_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-    """Collate function for TabDataset."""
+    """Collate function for TabDataset.
+
+    Returns an ``audio_mask`` boolean tensor (True = valid, False = pad).
+    """
+    # Filter out failed samples (None from __getitem__)
+    batch = [item for item in batch if item is not None]
+    if len(batch) == 0:
+        raise RuntimeError("All samples in batch failed to load")
+
     audio_emb = [item["audio_embeddings"] for item in batch]
     note_tokens = [item["note_tokens"] for item in batch]
     difficulty_ids = torch.stack([item["difficulty_id"] for item in batch])
     instrument_ids = torch.stack([item["instrument_id"] for item in batch])
-    genre_ids = torch.stack([item["genre_id"] for item in batch])
+
+    audio_lengths = torch.tensor([a.size(0) for a in audio_emb], dtype=torch.long)
 
     audio_padded = pad_sequence(audio_emb, batch_first=True, padding_value=0.0)
     tokens_padded = pad_sequence(note_tokens, batch_first=True, padding_value=0)
 
+    max_frames = audio_padded.size(1)
+    audio_mask = torch.arange(max_frames).unsqueeze(0) < audio_lengths.unsqueeze(1)
+
     return {
         "audio_embeddings": audio_padded,
+        "audio_mask": audio_mask,
         "note_tokens": tokens_padded,
         "difficulty_id": difficulty_ids,
         "instrument_id": instrument_ids,
-        "genre_id": genre_ids,
     }
 

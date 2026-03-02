@@ -1,0 +1,88 @@
+[Song]
+{
+  Name = "Sample Song"
+  Artist = "Tab Hero Sample Generator"
+  Charter = "Tab Hero"
+  Resolution = 192
+  Offset = 0
+}
+[SyncTrack]
+{
+  0 = B 120000
+  0 = TS 4
+}
+[Events]
+{
+}
+[EasySingle]
+{
+  0 = N 0 384
+  384 = N 1 384
+  768 = N 2 384
+  1152 = N 0 384
+}
+[MediumSingle]
+{
+  0 = N 0 384
+  384 = N 1 384
+  768 = N 2 384
+  1152 = N 0 384
+}
+[HardSingle]
+{
+  0 = N 0 384
+  0 = N 1 384
+  384 = N 1 384
+  384 = N 2 384
+  768 = N 2 384
+  768 = N 3 384
+  1152 = N 0 384
+  1152 = N 1 384
+}
+[ExpertSingle]
+{
+  0 = N 0 384
+  0 = N 1 384
+  384 = N 1 384
+  384 = N 2 384
+  768 = N 2 384
+  768 = N 3 384
+  1152 = N 0 384
+  1152 = N 1 384
+}
+[EasyDoubleBass]
+{
+  0 = N 0 384
+  384 = N 1 384
+  768 = N 2 384
+  1152 = N 0 384
+}
+[MediumDoubleBass]
+{
+  0 = N 0 384
+  384 = N 1 384
+  768 = N 2 384
+  1152 = N 0 384
+}
+[HardDoubleBass]
+{
+  0 = N 0 384
+  0 = N 1 384
+  384 = N 1 384
+  384 = N 2 384
+  768 = N 2 384
+  768 = N 3 384
+  1152 = N 0 384
+  1152 = N 1 384
+}
+[ExpertDoubleBass]
+{
+  0 = N 0 384
+  0 = N 1 384
+  384 = N 1 384
+  384 = N 2 384
+  768 = N 2 384
+  768 = N 3 384
+  1152 = N 0 384
+  1152 = N 1 384
+}

@@ -47,7 +47,9 @@ htmlcov/
 .mypy_cache/
 
 # Data and models
-data/
+data/*
+!data/sample/
+!data/features.csv
 checkpoints/
 outputs/
 *.pt
@@ -76,3 +78,5 @@ logs/
 # Environment
 .env
 .env.local
+
+.docs

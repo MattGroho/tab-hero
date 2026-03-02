@@ -1,0 +1,98 @@
+[Song]
+{
+  Name = "Sample Song"
+  Artist = "Tab Hero Sample Generator"
+  Charter = "Tab Hero"
+  Resolution = 192
+  Offset = 0
+}
+[SyncTrack]
+{
+  0 = B 120000
+  0 = TS 4
+}
+[Events]
+{
+}
+[EasySingle]
+{
+  0 = N 0 192
+  192 = N 2 192
+  384 = N 2 192
+  576 = N 0 192
+}
+[MediumSingle]
+{
+  0 = N 0 96
+  96 = N 1 96
+  192 = N 2 192
+  384 = N 3 48
+  480 = N 3 48
+  576 = N 0 192
+}
+[HardSingle]
+{
+  0 = N 0 96
+  96 = N 1 96
+  192 = N 2 192
+  384 = N 3 48
+  432 = N 4 48
+  480 = N 3 48
+  528 = N 2 48
+  576 = N 0 192
+  576 = N 2 192
+}
+[ExpertSingle]
+{
+  0 = N 0 96
+  96 = N 1 96
+  192 = N 2 192
+  384 = N 3 48
+  432 = N 4 48
+  480 = N 3 48
+  528 = N 2 48
+  576 = N 0 192
+  576 = N 2 192
+  576 = N 4 192
+}
+[EasyDoubleBass]
+{
+  0 = N 0 192
+  192 = N 2 192
+  384 = N 2 192
+  576 = N 0 192
+}
+[MediumDoubleBass]
+{
+  0 = N 0 96
+  96 = N 1 96
+  192 = N 2 192
+  384 = N 3 48
+  480 = N 3 48
+  576 = N 0 192
+}
+[HardDoubleBass]
+{
+  0 = N 0 96
+  96 = N 1 96
+  192 = N 2 192
+  384 = N 3 48
+  432 = N 4 48
+  480 = N 3 48
+  528 = N 2 48
+  576 = N 0 192
+  576 = N 2 192
+}
+[ExpertDoubleBass]
+{
+  0 = N 0 96
+  96 = N 1 96
+  192 = N 2 192
+  384 = N 3 48
+  432 = N 4 48
+  480 = N 3 48
+  528 = N 2 48
+  576 = N 0 192
+  576 = N 2 192
+  576 = N 4 192
+}
