@@ -4,6 +4,8 @@ Automatic guitar chart generation from audio using an encoder-decoder transforme
 
 Developed as a Milestone project for SIADS 696 at the University of Michigan by Matthew Grohotolski, Susan Hatem, and Christopher Pleman.
 
+**[Final Report](docs/Tab%20Hero%20Final%20Report.pdf)** | **[HuggingFace Model](https://huggingface.co/MattGroho/tab-hero)**
+
 ## Highlights
 
 - Generates charts for all 4 difficulty levels (Easy, Medium, Hard, Expert)
@@ -194,10 +196,15 @@ The custom `.tab` binary format stores compressed mel spectrograms and tokenized
 
 ## Documentation
 
+- [Final Report](docs/Tab%20Hero%20Final%20Report.pdf) - Full project write-up
 - [Architecture](docs/architecture.md) - Model design, encoder/decoder details, tokenization
 - [Data Format](docs/data_format.md) - `.tab` binary format specification, preprocessing pipeline
 - [Feature Extraction](docs/feature_extraction.md) - Per-chart feature extraction from `.tab` files
 - [Research Notes](docs/research_notes.md) - Design decisions, related work, evaluation metrics
+
+## Model
+
+The best checkpoint (epoch 65, val_loss=0.1085) is published on HuggingFace: [MattGroho/tab-hero](https://huggingface.co/MattGroho/tab-hero)
 
 ## License
 
